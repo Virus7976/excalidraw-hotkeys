@@ -27,6 +27,7 @@ The suggested keys are all under the left hand, so the right hand stays on the m
 | **Colour** | |
 | Pen colour 1–8 (lines, arrows, text) | `Alt+1` … `Alt+8` |
 | Fill colour 1–8 (inside of shapes) | `Alt+Shift+1` … `Alt+Shift+8` |
+| No line / No fill | `Alt+0` / `Alt+Shift+0` |
 | Cycle fill style (none, hachure, cross-hatch, solid) | `Alt+F`, back `Alt+Shift+F` |
 | Reset to black with no fill | ``Ctrl+` `` |
 | More see-through / More opaque | `Alt+X` / `Alt+Shift+X` |

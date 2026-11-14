@@ -242,7 +242,9 @@ function showColour(label: string, colour: string) {
 	colourNotice?.hide();
 	const frag = activeDocument.createDocumentFragment();
 	const row = frag.createDiv({ cls: "ekh-colour-notice" });
-	row.createSpan({ cls: "ekh-swatch" }).setCssProps({ "--ekh-swatch": colour });
+	const sw = row.createSpan({ cls: "ekh-swatch" });
+	if (colour === "transparent") sw.addClass("is-none");
+	else sw.setCssProps({ "--ekh-swatch": colour });
 	row.createSpan({ text: label });
 	colourNotice = new Notice(frag, 1200);
 }
@@ -413,7 +415,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 			if (!colour || colour === "transparent") s.addClass("is-none");
 			else s.setCssProps({ "--ekh-swatch": colour });
 		};
-		swatch("Stroke", stroke);
+		swatch("Pen", stroke);
 		swatch("Fill", fill);
 	}
 
@@ -618,14 +620,14 @@ export default class ExcalidrawHotkeys extends Plugin {
 			const n = i + 1;
 			list.push({
 				id: `stroke-colour-${n}`,
-				name: `Stroke colour ${n}`,
+				name: `Pen colour ${n}`,
 				group: "Colour",
 				keys: [hk(["Alt"], String(n))],
 				canRun: always,
 				whileTyping: true,
 				run: async (c) => {
 					const col = s().strokeColours[i];
-					setPen(c, { strokeColor: col }, { currentItemStrokeColor: col }, `Stroke colour ${n}`, col);
+					setPen(c, { strokeColor: col }, { currentItemStrokeColor: col }, `Pen colour ${n}`, col);
 					if (!c.typing) await edit(c, withBoundText(c), (el) => (el.strokeColor = col));
 				},
 			});
@@ -650,6 +652,31 @@ export default class ExcalidrawHotkeys extends Plugin {
 				},
 			});
 		}
+
+		// 0 means nothing: Alt+0 is no line, Alt+Shift+0 is no fill.
+		list.push({
+			id: "no-line",
+			name: "No line (pen colour 0)",
+			group: "Colour",
+			keys: [hk(["Alt"], "0")],
+			canRun: always,
+			run: async (c) => {
+				setPen(c, {}, { currentItemStrokeColor: "transparent" }, "No line", "transparent");
+				// Text with no line would vanish, so text keeps its colour.
+				await edit(c, c.selected.filter((el) => el.type !== "text"), (el) => (el.strokeColor = "transparent"));
+			},
+		});
+		list.push({
+			id: "no-fill",
+			name: "No fill (fill colour 0)",
+			group: "Colour",
+			keys: [hk(["Alt", "Shift"], "0")],
+			canRun: always,
+			run: async (c) => {
+				setPen(c, {}, { currentItemBackgroundColor: "transparent" }, "No fill", "transparent");
+				await edit(c, c.selected.filter((el) => el.type !== "text" && !LINEAR.includes(el.type)), (el) => (el.backgroundColor = "transparent"));
+			},
+		});
 
 		const FILLS = ["none", "hachure", "cross-hatch", "solid"];
 		cycle(
