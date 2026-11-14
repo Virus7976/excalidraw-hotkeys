@@ -1,7 +1,7 @@
 {
 	"id": "excalidraw-hotkeys",
 	"name": "Excalidraw Hotkeys",
-	"version": "0.2.2",
+	"version": "0.2.3",
 	"minAppVersion": "1.13.0",
 	"description": "Hotkeys for Excalidraw: colour, fill, resize, align, duplicate with an arrow. Set every key in Settings, Hotkeys.",
 	"author": "Virus7976",

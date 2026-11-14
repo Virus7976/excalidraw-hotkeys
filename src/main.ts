@@ -221,8 +221,21 @@ async function edit(c: Ctx, els: El[], fn: (el: El) => void) {
 	await c.ea.addElementsToView(false, true);
 }
 
+let colourNotice: Notice | null = null;
+
+/** A short popup with a colour square and its name. Replaces the last one. */
+function showColour(label: string, colour: string) {
+	colourNotice?.hide();
+	const frag = activeDocument.createDocumentFragment();
+	const row = frag.createDiv({ cls: "ekh-colour-notice" });
+	row.createSpan({ cls: "ekh-swatch" }).setCssProps({ "--ekh-swatch": colour });
+	row.createSpan({ text: label });
+	colourNotice = new Notice(frag, 1200);
+}
+
 /** Colour the text being typed, and set the colour for the next thing drawn. */
-function setPen(c: Ctx, typed: Partial<El>, pen: Record<string, string>, label: string) {
+function setPen(c: Ctx, typed: Partial<El>, pen: Record<string, string>, label: string, colour: string) {
+	showColour(label, colour);
 	const api = c.ea.getExcalidrawAPI?.();
 	if (!api) return;
 	if (c.typing) {
@@ -234,7 +247,6 @@ function setPen(c: Ctx, typed: Partial<El>, pen: Record<string, string>, label: 
 		return;
 	}
 	api.updateScene({ appState: pen, captureUpdate: "NEVER" });
-	if (c.selected.length === 0) new Notice(label, 1500);
 }
 
 // Remove an Obsidian block reference ("... ^abc123") from the end of a text.
@@ -519,7 +531,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				whileTyping: true,
 				run: async (c) => {
 					const col = s().strokeColours[i];
-					setPen(c, { strokeColor: col }, { currentItemStrokeColor: col }, `Pen: stroke colour ${n}`);
+					setPen(c, { strokeColor: col }, { currentItemStrokeColor: col }, `Stroke colour ${n}`, col);
 					if (!c.typing) await edit(c, withBoundText(c), (el) => (el.strokeColor = col));
 				},
 			});
@@ -535,7 +547,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				whileTyping: true,
 				run: async (c) => {
 					const fill = s().fillColours[i];
-					setPen(c, { strokeColor: s().strokeColours[i] }, { currentItemBackgroundColor: fill }, `Pen: fill colour ${n}`);
+					setPen(c, { strokeColor: s().strokeColours[i] }, { currentItemBackgroundColor: fill }, `Fill colour ${n}`, fill);
 					if (c.typing) return;
 					await edit(c, c.selected, (el) => {
 						if (el.type === "text") el.strokeColor = s().strokeColours[i];

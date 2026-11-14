@@ -49,7 +49,7 @@ Run **Show my hotkeys** at any time to see your keys. Press **Save as note** in 
 | **Other** | |
 | Show my hotkeys | none |
 
-With nothing selected, the stroke and fill keys set the colour for the next thing you draw or write. While you type a text, the stroke keys change the colour of that text.
+With nothing selected, the stroke and fill keys set the colour for the next thing you draw or write. While you type a text, the stroke keys change the colour of that text. Each colour key shows a short popup with the new colour.
 
 Hold two arrow keys to move the selection on a diagonal. Hold Shift too for a bigger step. This one is not in the Hotkeys menu.
 
