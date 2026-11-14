@@ -1,0 +1,35 @@
+.ekh-bar {
+	display: flex;
+	gap: var(--size-4-2);
+	margin-bottom: var(--size-4-3);
+}
+.ekh-bar input {
+	flex: 1;
+	min-width: 0;
+}
+.ekh-table {
+	width: 100%;
+	border-collapse: collapse;
+}
+.ekh-table th {
+	text-align: left;
+	padding: var(--size-4-3) 0 var(--size-4-1);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+}
+.ekh-table td {
+	padding: var(--size-2-2) 0;
+	border-top: 1px solid var(--background-modifier-border);
+	vertical-align: top;
+}
+.ekh-table td:last-child {
+	text-align: right;
+	white-space: nowrap;
+}
+.ekh-table kbd {
+	margin-left: var(--size-2-2);
+}
+.ekh-none {
+	color: var(--text-faint);
+}

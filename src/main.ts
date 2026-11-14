@@ -1,4 +1,17 @@
-import { App, Hotkey, ItemView, Modifier, Notice, Platform, Plugin, PluginSettingTab, Setting } from "obsidian";
+import {
+	App,
+	Hotkey,
+	ItemView,
+	Modal,
+	Modifier,
+	Notice,
+	Platform,
+	Plugin,
+	PluginSettingTab,
+	Setting,
+	TFile,
+	normalizePath,
+} from "obsidian";
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -12,11 +25,18 @@ interface HotkeySettings {
 	nudgeStep: number;
 	nudgeStepShift: number;
 	duplicateGap: number;
+	copyText: boolean;
+	copyFill: boolean;
 	resizePercent: number;
 	fitPadding: number;
+	zoomPresets: number[];
+	zoomMs: number;
+	zoomOnSelection: boolean;
+	notePath: string;
 }
 
 const COLOUR_NAMES = ["Red", "Orange", "Yellow", "Green", "Blue", "Purple", "Pink", "Grey"];
+const ZOOM_SLOTS = 9;
 
 const DEFAULT_SETTINGS: HotkeySettings = {
 	fillColours: ["#ffc9c9", "#ffe8cc", "#fff3bf", "#d8f5a2", "#a5d8ff", "#d0bfff", "#fcc2d7", "#e9ecef"],
@@ -26,8 +46,14 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 	nudgeStep: 12,
 	nudgeStepShift: 20,
 	duplicateGap: 80,
+	copyText: true,
+	copyFill: true,
 	resizePercent: 10,
 	fitPadding: 30,
+	zoomPresets: [25, 50, 100, 200, 400],
+	zoomMs: 350,
+	zoomOnSelection: true,
+	notePath: "Excalidraw Hotkeys.md",
 };
 
 // ---------------------------------------------------------------------------
@@ -49,23 +75,38 @@ interface Ctx {
 interface Action {
 	id: string;
 	name: string;
-	hotkeys?: Hotkey[];
+	group: string;
+	/** Suggested keys. Applied only when the user presses "Use suggested keys". */
+	keys?: Hotkey[];
 	/** Return false to let the key fall through to Excalidraw. */
 	canRun: (c: Ctx) => boolean;
-	run: (c: Ctx) => Promise<void>;
+	run: (c: Ctx) => Promise<void> | void;
 }
 
 const SHAPES = ["rectangle", "ellipse", "diamond"];
 const BOXES = ["rectangle", "ellipse", "diamond", "image", "embeddable", "frame"];
 const LINEAR = ["arrow", "line", "freedraw"];
+const FONT_SIZES: [string, number][] = [["small", 16], ["medium", 20], ["large", 28], ["very large", 36]];
+const FONTS: [string, string, number][] = [
+	["hand-drawn", "Hand-drawn", 5],
+	["normal", "Normal", 6],
+	["code", "Code", 8],
+];
+const LINE_STYLES = ["solid", "dashed", "dotted"];
+const LINE_WIDTHS: [string, string, number][] = [
+	["thin", "Thin", 1],
+	["bold", "Bold", 2],
+	["extra-bold", "Extra bold", 4],
+];
 
 const hk = (modifiers: Modifier[], key: string): Hotkey => ({ modifiers, key });
 
 const newId = () =>
 	Array.from(crypto.getRandomValues(new Uint8Array(10)), (b) => b.toString(16).padStart(2, "0")).join("");
 const newSeed = () => Math.floor(Math.random() * 2 ** 31);
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-// Text inside a box carries its own colour and alignment, so "the selection"
+// Text inside a box carries its own colour and font, so "the selection"
 // means the selected elements plus the text bound to them.
 function withBoundText(c: Ctx): El[] {
 	const ids = new Set<string>();
@@ -80,14 +121,14 @@ async function edit(c: Ctx, els: El[], fn: (el: El) => void) {
 	if (els.length === 0) return;
 	c.ea.copyViewElementsToEAforEditing(els);
 	for (const el of c.ea.getElements()) fn(el);
-	await c.ea.addElementsToView(false, false);
+	await c.ea.addElementsToView(false, true);
 }
 
 // Remove an Obsidian block reference ("... ^abc123") from the end of a text.
 const stripBlockRef = (s?: string) => (s ? s.replace(/\s*\^[\w-]+$/, "") : s);
 
 // ---------------------------------------------------------------------------
-// Key matching
+// Key matching and display
 // ---------------------------------------------------------------------------
 
 const CODE_TO_KEY: Record<string, string> = {
@@ -116,17 +157,30 @@ function matches(h: Hotkey, e: KeyboardEvent): boolean {
 	return keyNames(e).has(h.key.toUpperCase());
 }
 
+const KEY_LABEL: Record<string, string> = { ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→", " ": "Space" };
+
+function hotkeyLabel(h: Hotkey): string {
+	const order: Modifier[] = ["Mod", "Ctrl", "Meta", "Alt", "Shift"];
+	const name = (m: Modifier) =>
+		m === "Mod" ? (Platform.isMacOS ? "Cmd" : "Ctrl") : m === "Meta" ? (Platform.isMacOS ? "Cmd" : "Win") : m === "Alt" && Platform.isMacOS ? "Option" : m;
+	const mods = order.filter((m) => h.modifiers.includes(m)).map(name);
+	const key = KEY_LABEL[h.key] ?? (h.key.length === 1 ? h.key.toUpperCase() : h.key);
+	return [...mods, key].join("+");
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
 export default class ExcalidrawHotkeys extends Plugin {
 	settings: HotkeySettings = DEFAULT_SETTINGS;
-	private actions: Action[] = [];
+	actions: Action[] = [];
 	private pressed = new Set<string>();
 	// The keydown that already ran a command. Obsidian's hotkey handler and our
 	// own capture listener can both see one key press; this stops a double run.
 	private handled: Event | null = null;
+	private zoomFrame = 0;
+	private zoomGoal: number | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -136,7 +190,6 @@ export default class ExcalidrawHotkeys extends Plugin {
 			this.addCommand({
 				id: a.id,
 				name: a.name,
-				hotkeys: a.hotkeys,
 				checkCallback: (checking) => {
 					const ev = (window as any).event as Event | undefined;
 					if (ev && ev === this.handled) return true;
@@ -151,6 +204,12 @@ export default class ExcalidrawHotkeys extends Plugin {
 			});
 		}
 
+		this.addCommand({
+			id: "show-hotkeys",
+			name: "Show my hotkeys",
+			callback: () => new HotkeyListModal(this.app, this).open(),
+		});
+
 		this.registerDomEvent(window, "keydown", (e) => this.onKeyDown(e), { capture: true });
 		this.registerDomEvent(window, "keyup", (e) => this.pressed.delete(e.code), { capture: true });
 		this.registerDomEvent(window, "blur", () => this.pressed.clear());
@@ -158,11 +217,16 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.addSettingTab(new HotkeySettingTab(this.app, this));
 	}
 
+	onunload() {
+		cancelAnimationFrame(this.zoomFrame);
+	}
+
 	async loadSettings() {
 		const saved = (await this.loadData()) ?? {};
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
 		this.settings.fillColours = [...(saved.fillColours ?? DEFAULT_SETTINGS.fillColours)];
 		this.settings.strokeColours = [...(saved.strokeColours ?? DEFAULT_SETTINGS.strokeColours)];
+		this.settings.zoomPresets = [...(saved.zoomPresets ?? DEFAULT_SETTINGS.zoomPresets)];
 	}
 
 	async saveSettings() {
@@ -190,15 +254,31 @@ export default class ExcalidrawHotkeys extends Plugin {
 		return { ea, selected: ea.getViewSelectedElements() ?? [], all: ea.getViewElements() ?? [] };
 	}
 
-	/** The keys set in Settings, Hotkeys; the defaults if never changed. */
-	private hotkeysFor(a: Action): Hotkey[] {
+	/** The keys set in Settings, Hotkeys. */
+	hotkeysFor(id: string): Hotkey[] {
 		const hm = (this.app as any).hotkeyManager;
-		const full = `${this.manifest.id}:${a.id}`;
+		const full = `${this.manifest.id}:${id}`;
 		const custom = hm?.customKeys?.[full];
 		if (Array.isArray(custom)) return custom;
 		const def = hm?.defaultKeys?.[full];
 		if (Array.isArray(def)) return def;
-		return a.hotkeys ?? [];
+		return [];
+	}
+
+	/** Give each command its suggested key, unless the user already set one. */
+	async applySuggestedKeys(): Promise<number> {
+		const hm = (this.app as any).hotkeyManager;
+		if (!hm?.setHotkeys) return 0;
+		let n = 0;
+		for (const a of this.actions) {
+			const full = `${this.manifest.id}:${a.id}`;
+			if (!a.keys || Array.isArray(hm.customKeys?.[full])) continue;
+			hm.setHotkeys(full, a.keys);
+			n++;
+		}
+		await hm.save?.();
+		hm.bake?.();
+		return n;
 	}
 
 	private onKeyDown(e: KeyboardEvent) {
@@ -209,7 +289,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		if (!this.settings.catchKeysFirst) return;
 
 		for (const a of this.actions) {
-			if (!this.hotkeysFor(a).some((h) => matches(h, e))) continue;
+			if (!this.hotkeysFor(a.id).some((h) => matches(h, e))) continue;
 			const c = this.context();
 			if (!c || !a.canRun(c)) continue;
 			e.preventDefault();
@@ -247,32 +327,75 @@ export default class ExcalidrawHotkeys extends Plugin {
 	}
 
 	// -----------------------------------------------------------------------
+	// Smooth zoom
+	// -----------------------------------------------------------------------
+
+	private zoomTo(c: Ctx, goal: number) {
+		const api = c.ea.getExcalidrawAPI?.();
+		if (!api) return;
+		const st = api.getAppState();
+		const z0: number = st.zoom.value;
+		const w: number = st.width;
+		const h: number = st.height;
+		goal = clamp(goal, 0.1, 30);
+
+		// The scene point now in the middle of the screen, and the one to end on.
+		const from = { x: w / 2 / z0 - st.scrollX, y: h / 2 / z0 - st.scrollY };
+		let to = from;
+		if (this.settings.zoomOnSelection && c.selected.length > 0) {
+			const xs = c.selected.flatMap((el) => [el.x, el.x + el.width]);
+			const ys = c.selected.flatMap((el) => [el.y, el.y + el.height]);
+			to = { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+		}
+
+		cancelAnimationFrame(this.zoomFrame);
+		this.zoomGoal = goal;
+		// A hidden window gets no animation frames, so jump straight there.
+		const ms = document.hidden ? 0 : this.settings.zoomMs;
+		const start = performance.now();
+		const ease = (p: number) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
+
+		const frame = (now: number) => {
+			const p = ms <= 0 ? 1 : Math.min(1, (now - start) / ms);
+			const k = ease(p);
+			// Zoom on a log scale so 25% to 400% feels even all the way.
+			const z = Math.exp(Math.log(z0) + (Math.log(goal) - Math.log(z0)) * k);
+			const cx = from.x + (to.x - from.x) * k;
+			const cy = from.y + (to.y - from.y) * k;
+			api.updateScene({ appState: { zoom: { value: z }, scrollX: w / 2 / z - cx, scrollY: h / 2 / z - cy } });
+			if (p < 1) this.zoomFrame = requestAnimationFrame(frame);
+			else this.zoomGoal = null;
+		};
+		if (ms <= 0) frame(start);
+		else this.zoomFrame = requestAnimationFrame(frame);
+	}
+
+	private currentZoom(c: Ctx): number {
+		return this.zoomGoal ?? c.ea.getExcalidrawAPI?.()?.getAppState().zoom.value ?? 1;
+	}
+
+	private sortedPresets(): number[] {
+		return [...this.settings.zoomPresets].filter((p) => p > 0).sort((a, b) => a - b).map((p) => p / 100);
+	}
+
+	// -----------------------------------------------------------------------
 	// Actions
 	// -----------------------------------------------------------------------
 
 	private buildActions(): Action[] {
 		const s = () => this.settings;
 		const any = (c: Ctx) => c.selected.length > 0;
+		const always = () => true;
 		const list: Action[] = [];
 
-		// Fill and stroke colours ------------------------------------------------
+		// Colour ----------------------------------------------------------------
 		for (let i = 0; i < 8; i++) {
 			const n = i + 1;
 			list.push({
-				id: `fill-colour-${n}`,
-				name: `Fill colour ${n}`,
-				hotkeys: [hk(["Alt"], String(n))],
-				canRun: any,
-				run: (c) =>
-					edit(c, c.selected, (el) => {
-						if (el.type === "text") el.strokeColor = s().strokeColours[i];
-						else if (!LINEAR.includes(el.type)) el.backgroundColor = s().fillColours[i];
-					}),
-			});
-			list.push({
 				id: `stroke-colour-${n}`,
 				name: `Stroke colour ${n}`,
-				hotkeys: [hk(["Alt", "Shift"], String(n))],
+				group: "Colour",
+				keys: [hk(["Alt", "Shift"], String(n))],
 				canRun: any,
 				run: (c) =>
 					edit(c, withBoundText(c), (el) => {
@@ -280,11 +403,27 @@ export default class ExcalidrawHotkeys extends Plugin {
 					}),
 			});
 		}
+		for (let i = 0; i < 8; i++) {
+			const n = i + 1;
+			list.push({
+				id: `fill-colour-${n}`,
+				name: `Fill colour ${n}`,
+				group: "Colour",
+				keys: [hk(["Alt"], String(n))],
+				canRun: any,
+				run: (c) =>
+					edit(c, c.selected, (el) => {
+						if (el.type === "text") el.strokeColor = s().strokeColours[i];
+						else if (!LINEAR.includes(el.type)) el.backgroundColor = s().fillColours[i];
+					}),
+			});
+		}
 
 		list.push({
 			id: "cycle-fill-style",
 			name: "Cycle fill style",
-			hotkeys: [hk(["Alt"], "F")],
+			group: "Colour",
+			keys: [hk(["Alt"], "F")],
 			canRun: (c) => c.selected.some((el) => SHAPES.includes(el.type)),
 			run: (c) =>
 				edit(c, c.selected, (el) => {
@@ -304,7 +443,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 		list.push({
 			id: "reset-colours",
 			name: "Reset to black with no fill",
-			hotkeys: [hk(["Mod"], "`")],
+			group: "Colour",
+			keys: [hk(["Mod"], "`")],
 			canRun: any,
 			run: (c) =>
 				edit(c, withBoundText(c), (el) => {
@@ -318,7 +458,98 @@ export default class ExcalidrawHotkeys extends Plugin {
 				}),
 		});
 
-		// Text alignment ----------------------------------------------------------
+		const opacityStep = (up: boolean): Action => ({
+			id: up ? "opacity-up" : "opacity-down",
+			name: up ? "More opaque" : "More see-through",
+			group: "Colour",
+			keys: [hk(["Alt"], up ? "=" : "-")],
+			canRun: any,
+			run: (c) =>
+				edit(c, withBoundText(c), (el) => {
+					el.opacity = clamp(Math.round(((el.opacity ?? 100) + (up ? 10 : -10)) / 10) * 10, 10, 100);
+				}),
+		});
+		list.push(opacityStep(false), opacityStep(true));
+
+		// Lines -------------------------------------------------------------------
+		const lineTargets = (c: Ctx) => c.selected.filter((el) => el.type !== "text" && el.type !== "image");
+		const arrows = (c: Ctx) => c.selected.filter((el) => el.type === "arrow");
+
+		for (const style of LINE_STYLES) {
+			list.push({
+				id: `line-style-${style}`,
+				name: `Line style ${style}`,
+				group: "Lines",
+				canRun: (c) => lineTargets(c).length > 0,
+				run: (c) => edit(c, lineTargets(c), (el) => (el.strokeStyle = style)),
+			});
+		}
+		list.push({
+			id: "cycle-line-style",
+			name: "Cycle line style",
+			group: "Lines",
+			keys: [hk(["Alt"], "D")],
+			canRun: (c) => lineTargets(c).length > 0,
+			run: (c) => {
+				const els = lineTargets(c);
+				const next = LINE_STYLES[(LINE_STYLES.indexOf(els[0].strokeStyle ?? "solid") + 1) % LINE_STYLES.length];
+				return edit(c, els, (el) => (el.strokeStyle = next));
+			},
+		});
+
+		for (const [id, name, width] of LINE_WIDTHS) {
+			list.push({
+				id: `line-width-${id}`,
+				name: `Line width ${name.toLowerCase()}`,
+				group: "Lines",
+				canRun: (c) => lineTargets(c).length > 0,
+				run: (c) => edit(c, lineTargets(c), (el) => (el.strokeWidth = width)),
+			});
+		}
+		list.push({
+			id: "cycle-line-width",
+			name: "Cycle line width",
+			group: "Lines",
+			keys: [hk(["Alt"], "W")],
+			canRun: (c) => lineTargets(c).length > 0,
+			run: (c) => {
+				const els = lineTargets(c);
+				const widths = LINE_WIDTHS.map((w) => w[2]);
+				const i = widths.indexOf(els[0].strokeWidth);
+				const next = widths[(i + 1) % widths.length];
+				return edit(c, els, (el) => (el.strokeWidth = next));
+			},
+		});
+
+		for (const end of ["start", "end"] as const) {
+			const prop = end === "start" ? "startArrowhead" : "endArrowhead";
+			list.push({
+				id: `toggle-${end}-arrowhead`,
+				name: `Turn ${end} arrowhead on or off`,
+				group: "Lines",
+				keys: [hk(["Alt"], end === "start" ? "[" : "]")],
+				canRun: (c) => arrows(c).length > 0,
+				run: (c) => {
+					const els = arrows(c);
+					const next = els[0][prop] ? null : "arrow";
+					return edit(c, els, (el) => (el[prop] = next));
+				},
+			});
+		}
+
+		// Text --------------------------------------------------------------------
+		const texts = (c: Ctx) => withBoundText(c).filter((el) => el.type === "text");
+		const editText = async (c: Ctx, fn: (el: El) => void) => {
+			const els = texts(c);
+			if (els.length === 0) return;
+			c.ea.copyViewElementsToEAforEditing(els);
+			for (const el of c.ea.getElements()) {
+				fn(el);
+				c.ea.refreshTextElementSize?.(el.id);
+			}
+			await c.ea.addElementsToView(false, true);
+		};
+
 		const aligns: [string, string, string][] = [
 			["left", "Align text left", "L"],
 			["center", "Align text centre", ";"],
@@ -328,18 +559,73 @@ export default class ExcalidrawHotkeys extends Plugin {
 			list.push({
 				id: `align-text-${value}`,
 				name,
-				hotkeys: [hk(["Mod", "Shift"], key)],
-				canRun: (c) => withBoundText(c).some((el) => el.type === "text"),
-				run: (c) =>
-					edit(
-						c,
-						withBoundText(c).filter((el) => el.type === "text"),
-						(el) => {
-							el.textAlign = value;
-						},
-					),
+				group: "Text",
+				keys: [hk(["Mod", "Shift"], key)],
+				canRun: (c) => texts(c).length > 0,
+				run: (c) => edit(c, texts(c), (el) => (el.textAlign = value)),
 			});
 		}
+
+		for (const [label, size] of FONT_SIZES) {
+			list.push({
+				id: `font-size-${label.replace(" ", "-")}`,
+				name: `Font size ${label}`,
+				group: "Text",
+				canRun: (c) => texts(c).length > 0,
+				run: (c) => editText(c, (el) => (el.fontSize = size)),
+			});
+		}
+		for (const up of [true, false]) {
+			list.push({
+				id: up ? "font-size-up" : "font-size-down",
+				name: up ? "Font size up" : "Font size down",
+				group: "Text",
+				canRun: (c) => texts(c).length > 0,
+				run: (c) => editText(c, (el) => (el.fontSize = Math.max(4, Math.round(el.fontSize * (up ? 1.1 : 0.9))))),
+			});
+		}
+		for (const [id, name, family] of FONTS) {
+			list.push({
+				id: `font-${id}`,
+				name: `Font ${name.toLowerCase()}`,
+				group: "Text",
+				canRun: (c) => texts(c).length > 0,
+				run: (c) => editText(c, (el) => (el.fontFamily = family)),
+			});
+		}
+		list.push({
+			id: "cycle-font",
+			name: "Cycle font",
+			group: "Text",
+			keys: [hk(["Alt"], "T")],
+			canRun: (c) => texts(c).length > 0,
+			run: (c) => {
+				const families = FONTS.map((f) => f[2]);
+				const next = families[(families.indexOf(texts(c)[0].fontFamily) + 1) % families.length];
+				return editText(c, (el) => (el.fontFamily = next));
+			},
+		});
+
+		const withText = (c: Ctx) =>
+			c.selected.filter((el) => (el.boundElements ?? []).some((b: El) => b.type === "text"));
+		list.push({
+			id: "fit-box-to-text",
+			name: "Fit box to text",
+			group: "Text",
+			keys: [hk(["Mod"], "/")],
+			canRun: (c) => withText(c).length > 0,
+			run: (c) =>
+				edit(c, withText(c), (el) => {
+					const t = c.all.find((x) => x.type === "text" && x.containerId === el.id);
+					if (!t) return;
+					const w = t.width + s().fitPadding;
+					const h = t.height + s().fitPadding;
+					el.x += (el.width - w) / 2;
+					el.y += (el.height - h) / 2;
+					el.width = w;
+					el.height = h;
+				}),
+		});
 
 		// Duplicate with an arrow ---------------------------------------------------
 		const dirs: [string, string, number, number][] = [
@@ -352,13 +638,26 @@ export default class ExcalidrawHotkeys extends Plugin {
 			c.selected.filter(
 				(el) =>
 					(BOXES.includes(el.type) || el.type === "text") &&
-					!(el.type === "text" && el.containerId && c.selected.some((s) => s.id === el.containerId)),
+					!(el.type === "text" && el.containerId && c.selected.some((x) => x.id === el.containerId)),
 			);
+		const cloneEl = (el: El, ox: number, oy: number): El => {
+			const copy = JSON.parse(JSON.stringify(el));
+			copy.id = newId();
+			copy.seed = newSeed();
+			copy.versionNonce = newSeed();
+			copy.version = 1;
+			copy.x += ox;
+			copy.y += oy;
+			copy.boundElements = [];
+			copy.groupIds = [];
+			return copy;
+		};
 		for (const [name, key, dx, dy] of dirs) {
 			list.push({
 				id: `duplicate-${name}`,
 				name: `Duplicate ${name} with an arrow`,
-				hotkeys: [hk(["Mod"], key)],
+				group: "Duplicate",
+				keys: [hk(["Mod"], key)],
 				canRun: (c) => dupSources(c).length > 0,
 				run: async (c) => {
 					const sources = dupSources(c);
@@ -367,19 +666,21 @@ export default class ExcalidrawHotkeys extends Plugin {
 					const newIds: string[] = [];
 					for (const src of sources) {
 						const el = ea.getElement(src.id);
-						const copy = JSON.parse(JSON.stringify(el));
-						copy.id = newId();
-						copy.seed = newSeed();
-						copy.versionNonce = newSeed();
-						copy.version = 1;
-						copy.x += dx * (el.width + s().duplicateGap);
-						copy.y += dy * (el.height + s().duplicateGap);
-						copy.boundElements = [];
-						copy.groupIds = [];
-						copy.backgroundColor = "transparent";
+						const ox = dx * (el.width + s().duplicateGap);
+						const oy = dy * (el.height + s().duplicateGap);
+						const copy = cloneEl(el, ox, oy);
+						if (!s().copyFill) copy.backgroundColor = "transparent";
 						if (copy.type === "text") copy.containerId = null;
 						ea.elementsDict[copy.id] = copy;
 						newIds.push(copy.id);
+
+						const label = c.all.find((t) => t.type === "text" && t.containerId === el.id);
+						if (s().copyText && label && copy.type !== "text") {
+							const t = cloneEl(label, ox, oy);
+							t.containerId = copy.id;
+							ea.elementsDict[t.id] = t;
+							copy.boundElements = [{ type: "text", id: t.id }];
+						}
 
 						ea.style.strokeColor = el.strokeColor;
 						ea.style.strokeWidth = 1;
@@ -390,13 +691,24 @@ export default class ExcalidrawHotkeys extends Plugin {
 							numberOfPoints: 0,
 						});
 					}
-					await ea.addElementsToView(false, false);
-					ea.selectElementsInView(ea.getViewElements().filter((el: El) => newIds.includes(el.id)));
+					// One scene update with the copies, arrows and new selection, so one
+					// Ctrl+Z removes the whole duplicate.
+					const api = ea.getExcalidrawAPI();
+					const changed = new Map<string, El>(ea.getElements().map((x: El) => [x.id, x]));
+					const merged = api.getSceneElementsIncludingDeleted().map((x: El) => {
+						const n = changed.get(x.id);
+						if (!n) return x;
+						changed.delete(x.id);
+						return { ...n, version: (x.version ?? 1) + 1, versionNonce: newSeed() };
+					});
+					merged.push(...changed.values());
+					const selectedElementIds = Object.fromEntries(newIds.map((id) => [id, true]));
+					api.updateScene({ elements: merged, appState: { selectedElementIds }, captureUpdate: "IMMEDIATELY" });
 				},
 			});
 		}
 
-		// Resize ------------------------------------------------------------------
+		// Size --------------------------------------------------------------------
 		const resizable = (c: Ctx) => c.selected.filter((el) => el.type !== "text" && !LINEAR.includes(el.type));
 		const factor = (grow: boolean) => 1 + ((grow ? 1 : -1) * s().resizePercent) / 100;
 
@@ -407,7 +719,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 			list.push({
 				id: `${word.toLowerCase()}-width`,
 				name: `${word} width`,
-				hotkeys: [hk(["Shift"], key)],
+				group: "Size",
+				keys: [hk(["Shift"], key)],
 				canRun: (c) => resizable(c).length > 0,
 				run: (c) =>
 					edit(c, resizable(c), (el) => {
@@ -419,7 +732,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 			list.push({
 				id: `${word.toLowerCase()}-height`,
 				name: `${word} height`,
-				hotkeys: [hk(["Alt"], key)],
+				group: "Size",
+				keys: [hk(["Alt"], key)],
 				canRun: (c) => resizable(c).length > 0,
 				run: (c) =>
 					edit(c, resizable(c), (el) => {
@@ -431,7 +745,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 			list.push({
 				id: `${word.toLowerCase()}-size`,
 				name: `${word} size or line width`,
-				hotkeys: [hk(["Mod", "Shift"], key)],
+				group: "Size",
+				keys: [hk(["Mod", "Shift"], key)],
 				// All text selected: let Excalidraw change the font size instead.
 				canRun: (c) => c.selected.some((el) => el.type !== "text"),
 				run: (c) =>
@@ -451,30 +766,143 @@ export default class ExcalidrawHotkeys extends Plugin {
 			});
 		}
 
-		// Fit box to text -----------------------------------------------------------
-		const withText = (c: Ctx) =>
-			c.selected.filter((el) => (el.boundElements ?? []).some((b: El) => b.type === "text"));
-		list.push({
-			id: "fit-box-to-text",
-			name: "Fit box to text",
-			hotkeys: [hk(["Mod"], "/")],
-			canRun: (c) => withText(c).length > 0,
-			run: (c) => {
-				const boxes = withText(c);
-				return edit(c, boxes, (el) => {
-					const t = c.all.find((x) => x.type === "text" && x.containerId === el.id);
-					if (!t) return;
-					const w = t.width + s().fitPadding;
-					const h = t.height + s().fitPadding;
-					el.x += (el.width - w) / 2;
-					el.y += (el.height - h) / 2;
-					el.width = w;
-					el.height = h;
-				});
-			},
-		});
+		// Zoom --------------------------------------------------------------------
+		for (let i = 0; i < ZOOM_SLOTS; i++) {
+			list.push({
+				id: `zoom-preset-${i + 1}`,
+				name: `Zoom preset ${i + 1}`,
+				group: "Zoom",
+				keys: i < 5 ? [hk(["Mod", "Alt"], String(i + 1))] : undefined,
+				canRun: () => i < s().zoomPresets.length,
+				run: (c) => this.zoomTo(c, s().zoomPresets[i] / 100),
+			});
+		}
+		for (const inward of [true, false]) {
+			list.push({
+				id: inward ? "zoom-in" : "zoom-out",
+				name: inward ? "Zoom in to the next preset" : "Zoom out to the next preset",
+				group: "Zoom",
+				keys: [hk(["Mod", "Alt"], inward ? "=" : "-")],
+				canRun: always,
+				run: (c) => {
+					const z = this.currentZoom(c);
+					const presets = this.sortedPresets();
+					const next = inward ? presets.find((p) => p > z * 1.001) : [...presets].reverse().find((p) => p < z / 1.001);
+					if (next !== undefined) this.zoomTo(c, next);
+				},
+			});
+		}
 
 		return list;
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Hotkey list
+// ---------------------------------------------------------------------------
+
+function openHotkeySettings(app: App) {
+	const setting = (app as any).setting;
+	setting.open();
+	setting.openTabById("hotkeys");
+	try {
+		const tab = setting.activeTab;
+		tab.searchComponent.setValue("Excalidraw Hotkeys");
+		tab.updateHotkeyVisibility();
+	} catch {
+		new Notice("Search for Excalidraw Hotkeys");
+	}
+}
+
+function hotkeyRows(plugin: ExcalidrawHotkeys) {
+	const all = [
+		...plugin.actions.map((a) => ({ id: a.id, name: a.name, group: a.group })),
+		{ id: "show-hotkeys", name: "Show my hotkeys", group: "Other" },
+	];
+	return all.map((r) => ({ ...r, keys: plugin.hotkeysFor(r.id).map(hotkeyLabel) }));
+}
+
+function hotkeyMarkdown(plugin: ExcalidrawHotkeys): string {
+	const rows = hotkeyRows(plugin);
+	const groups = [...new Set(rows.map((r) => r.group))];
+	const out = [
+		"# Excalidraw Hotkeys",
+		"",
+		"Your keys right now. Change them in Settings → Hotkeys. Run **Show my hotkeys** and press **Save as note** to update this note.",
+		"",
+	];
+	for (const g of groups) {
+		out.push(`## ${g}`, "", "| Command | Key | ID |", "|---|---|---|");
+		for (const r of rows.filter((x) => x.group === g)) {
+			const keys = r.keys.length ? r.keys.map((k) => `\`${k}\``).join(", ") : "none";
+			out.push(`| ${r.name} | ${keys} | \`excalidraw-hotkeys:${r.id}\` |`);
+		}
+		out.push("");
+	}
+	out.push(
+		"## Not in the Hotkeys menu",
+		"",
+		"- Hold two arrow keys to move on a diagonal. Hold Shift too for a bigger step.",
+		`- Zoom presets now: ${plugin.settings.zoomPresets.map((p) => `${p}%`).join(", ")}.`,
+		"",
+	);
+	return out.join("\n");
+}
+
+class HotkeyListModal extends Modal {
+	constructor(app: App, private plugin: ExcalidrawHotkeys) {
+		super(app);
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		this.titleEl.setText("My hotkeys");
+		const rows = hotkeyRows(this.plugin);
+
+		const bar = contentEl.createDiv({ cls: "ekh-bar" });
+		const search = bar.createEl("input", { type: "search", placeholder: "Filter" });
+		const changeBtn = bar.createEl("button", { text: "Change keys" });
+		const saveBtn = bar.createEl("button", { text: "Save as note", cls: "mod-cta" });
+
+		const table = contentEl.createEl("table", { cls: "ekh-table" });
+		const body = table.createEl("tbody");
+		const render = (q: string) => {
+			body.empty();
+			let group = "";
+			for (const r of rows) {
+				const hay = `${r.name} ${r.keys.join(" ")} ${r.group}`.toLowerCase();
+				if (q && !q.split(/\s+/).every((w) => hay.includes(w))) continue;
+				if (r.group !== group) {
+					group = r.group;
+					body.createEl("tr").createEl("th", { text: group, attr: { colspan: "2" } });
+				}
+				const tr = body.createEl("tr");
+				tr.createEl("td", { text: r.name });
+				const keyCell = tr.createEl("td");
+				if (r.keys.length === 0) keyCell.createSpan({ text: "none", cls: "ekh-none" });
+				for (const k of r.keys) keyCell.createEl("kbd", { text: k });
+			}
+		};
+		render("");
+		search.addEventListener("input", () => render(search.value.toLowerCase().trim()));
+		search.focus();
+
+		changeBtn.addEventListener("click", () => {
+			this.close();
+			openHotkeySettings(this.app);
+		});
+		saveBtn.addEventListener("click", async () => {
+			const path = normalizePath(this.plugin.settings.notePath || DEFAULT_SETTINGS.notePath);
+			const text = hotkeyMarkdown(this.plugin);
+			const file = this.app.vault.getAbstractFileByPath(path);
+			if (file instanceof TFile) await this.app.vault.modify(file, text);
+			else await this.app.vault.create(path, text);
+			new Notice(`Saved to ${path}`);
+		});
+	}
+
+	onClose() {
+		this.contentEl.empty();
 	}
 }
 
@@ -496,17 +924,16 @@ class HotkeySettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Hotkeys")
 			.setDesc("Set the keys for every command.")
+			.addButton((b) => b.setButtonText("Show my hotkeys").onClick(() => new HotkeyListModal(this.app, this.plugin).open()))
+			.addButton((b) => b.setButtonText("Change keys").onClick(() => openHotkeySettings(this.app)));
+
+		new Setting(containerEl)
+			.setName("Use suggested keys")
+			.setDesc("Give each command without a key its suggested key.")
 			.addButton((b) =>
-				b.setButtonText("Open hotkeys").onClick(() => {
-					const setting = (this.app as any).setting;
-					setting.openTabById("hotkeys");
-					const tab = setting.activeTab;
-					try {
-						tab.searchComponent.setValue("Excalidraw Hotkeys");
-						tab.updateHotkeyVisibility();
-					} catch {
-						new Notice("Search for Excalidraw Hotkeys");
-					}
+				b.setButtonText("Use suggested keys").onClick(async () => {
+					const n = await this.plugin.applySuggestedKeys();
+					new Notice(n === 0 ? "Every command already has a key" : `Set ${n} keys`);
 				}),
 			);
 
@@ -516,6 +943,46 @@ class HotkeySettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(st.catchKeysFirst).onChange(async (v) => {
 					st.catchKeysFirst = v;
+					await save();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Hotkey note")
+			.setDesc("Where Save as note writes the list.")
+			.addText((t) =>
+				t.setValue(st.notePath).onChange(async (v) => {
+					st.notePath = v.trim() || DEFAULT_SETTINGS.notePath;
+					await save();
+				}),
+			);
+
+		new Setting(containerEl).setName("Zoom").setHeading();
+		new Setting(containerEl)
+			.setName("Zoom presets")
+			.setDesc(`Percent, separated by commas. Up to ${ZOOM_SLOTS}. Preset 1 is the first number.`)
+			.addText((t) =>
+				t
+					.setPlaceholder("25, 50, 100, 200, 400")
+					.setValue(st.zoomPresets.join(", "))
+					.onChange(async (v) => {
+						const nums = v
+							.split(/[,\s]+/)
+							.map((x) => parseFloat(x))
+							.filter((x) => Number.isFinite(x) && x >= 10 && x <= 3000)
+							.slice(0, ZOOM_SLOTS);
+						if (nums.length === 0) return;
+						st.zoomPresets = nums;
+						await save();
+					}),
+			);
+		this.slider(containerEl, "Zoom speed", "Milliseconds for one zoom. 0 is instant.", 0, 1500, "zoomMs", 50);
+		new Setting(containerEl)
+			.setName("Zoom on the selection")
+			.setDesc("With something selected, zoom moves to it.")
+			.addToggle((t) =>
+				t.setValue(st.zoomOnSelection).onChange(async (v) => {
+					st.zoomOnSelection = v;
 					await save();
 				}),
 			);
@@ -550,7 +1017,28 @@ class HotkeySettingTab extends PluginSettingTab {
 				);
 		}
 
-		new Setting(containerEl).setName("Moving").setHeading();
+		new Setting(containerEl).setName("Duplicate").setHeading();
+		new Setting(containerEl)
+			.setName("Copy keeps text")
+			.setDesc("The copy gets the same label as the box.")
+			.addToggle((t) =>
+				t.setValue(st.copyText).onChange(async (v) => {
+					st.copyText = v;
+					await save();
+				}),
+			);
+		new Setting(containerEl)
+			.setName("Copy keeps fill")
+			.setDesc("The copy gets the same fill as the box.")
+			.addToggle((t) =>
+				t.setValue(st.copyFill).onChange(async (v) => {
+					st.copyFill = v;
+					await save();
+				}),
+			);
+		this.slider(containerEl, "Duplicate gap", "Space between a box and its copy.", 10, 300, "duplicateGap");
+
+		new Setting(containerEl).setName("Moving and sizing").setHeading();
 		new Setting(containerEl)
 			.setName("Diagonal move")
 			.setDesc("Hold two arrow keys to move the selection on a diagonal.")
@@ -562,10 +1050,7 @@ class HotkeySettingTab extends PluginSettingTab {
 			);
 		this.slider(containerEl, "Diagonal step", "Pixels per key press.", 1, 50, "nudgeStep");
 		this.slider(containerEl, "Diagonal step with Shift", "Pixels per key press with Shift held.", 1, 100, "nudgeStepShift");
-
-		new Setting(containerEl).setName("Sizes").setHeading();
 		this.slider(containerEl, "Resize step", "Percent per key press.", 1, 50, "resizePercent");
-		this.slider(containerEl, "Duplicate gap", "Space between a box and its copy.", 10, 300, "duplicateGap");
 		this.slider(containerEl, "Fit padding", "Space around the text after Fit box to text.", 0, 100, "fitPadding");
 	}
 
@@ -575,14 +1060,15 @@ class HotkeySettingTab extends PluginSettingTab {
 		desc: string,
 		min: number,
 		max: number,
-		key: "nudgeStep" | "nudgeStepShift" | "resizePercent" | "duplicateGap" | "fitPadding",
+		key: "nudgeStep" | "nudgeStepShift" | "resizePercent" | "duplicateGap" | "fitPadding" | "zoomMs",
+		step = 1,
 	) {
 		new Setting(el)
 			.setName(name)
 			.setDesc(desc)
 			.addSlider((s) =>
 				s
-					.setLimits(min, max, 1)
+					.setLimits(min, max, step)
 					.setValue(this.plugin.settings[key])
 					.setDynamicTooltip()
 					.onChange(async (v) => {
