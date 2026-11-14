@@ -8,6 +8,8 @@ import {
 	Platform,
 	Plugin,
 	PluginSettingTab,
+	Scope,
+	Setting,
 	SettingDefinition,
 	SettingDefinitionItem,
 	TFile,
@@ -264,6 +266,8 @@ async function edit(c: Ctx, els: El[], fn: (el: El) => void) {
 }
 
 let colourNotice: Notice | null = null;
+/** Stops the tool key button that is waiting for a key, if any. */
+let stopRecording: (() => void) | null = null;
 let statusRefresh: (() => void) | null = null;
 
 /** A short popup with a colour square and its name. Replaces the last one. */
@@ -304,6 +308,14 @@ function setPen(c: Ctx, typed: Partial<El>, pen: Record<string, string>, label: 
 	if (c.selected.length > 0) return;
 	api.updateScene({ appState: pen, captureUpdate: "NEVER" });
 	statusRefresh?.();
+}
+
+/** A key press as text, like "Alt+Shift+W". Empty for a modifier on its own. */
+function comboOf(e: KeyboardEvent): string {
+	if (/^(Shift|Control|Alt|Meta|OS)(Left|Right)?$/.test(e.code)) return "";
+	const key = e.code.startsWith("Key") ? e.code.slice(3) : e.code.startsWith("Digit") ? e.code.slice(5) : e.code;
+	const mods = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && (Platform.isMacOS ? "Cmd" : "Win")].filter(Boolean);
+	return [...mods, key].join("+");
 }
 
 // Remove an Obsidian block reference ("... ^abc123") from the end of a text.
@@ -456,6 +468,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 	onunload() {
 		statusRefresh = null;
+		stopRecording?.();
 		window.cancelAnimationFrame(this.zoomFrame);
 	}
 
@@ -562,13 +575,13 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 	/** The tool command whose letter this key is, if any. */
 	toolForKey(e: KeyboardEvent): Action | undefined {
-		if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || !e.code.startsWith("Key")) return undefined;
-		const letter = e.code.slice(3);
-		const id = Object.keys(this.settings.toolKeys).find((k) => this.settings.toolKeys[k]?.toUpperCase() === letter);
+		const combo = comboOf(e).toUpperCase();
+		if (!combo) return undefined;
+		const id = Object.keys(this.settings.toolKeys).find((k) => this.settings.toolKeys[k]?.toUpperCase() === combo);
 		return id ? this.actions.find((a) => a.id === id) : undefined;
 	}
 
-	// A tool letter: only inside a drawing, and never while typing.
+	// A tool key: only inside a drawing, and never while typing.
 	private tryToolKey(e: KeyboardEvent): boolean {
 		if (e.repeat) return false;
 		const a = this.toolForKey(e);
@@ -1328,7 +1341,7 @@ function hotkeyRows(plugin: ExcalidrawHotkeys) {
 	];
 	return all.map((r) => {
 		const letter = plugin.settings.toolKeys[r.id];
-		return { ...r, keys: [...(letter ? [letter.toUpperCase()] : []), ...plugin.hotkeysFor(r.id).map(hotkeyLabel)] };
+		return { ...r, keys: [...(letter ? [letter] : []), ...plugin.hotkeysFor(r.id).map(hotkeyLabel)] };
 	});
 }
 
@@ -1509,19 +1522,19 @@ class HotkeySettingTab extends PluginSettingTab {
 					{
 						type: "page",
 						name: "Tool keys",
-						desc: "One letter for each tool. They work only in a drawing, never while you type.",
+						desc: "A key for each tool. Click a key, then press any key or combo. They work only in a drawing, never while you type.",
 						displayValue: () =>
 							Object.entries(this.plugin.settings.toolKeys)
 								.filter(([, v]) => v)
-								.map(([, v]) => v.toUpperCase())
-								.join(" "),
+								.map(([, v]) => v)
+								.join(", "),
 						items: [
 							{
 								type: "group",
 								items: [
 									{
 										name: "Reset tool keys",
-										desc: "Put back the suggested letters.",
+										desc: "Put back the suggested keys.",
 										action: () => {
 											this.plugin.settings.toolKeys = { ...DEFAULT_SETTINGS.toolKeys };
 											void this.plugin.saveSettings().then(() => this.update());
@@ -1531,7 +1544,7 @@ class HotkeySettingTab extends PluginSettingTab {
 							},
 							{
 								type: "group",
-								heading: "Letters",
+								heading: "Keys",
 								items: this.plugin.actions
 									.filter((a) => a.group === "Tools")
 									.map(
@@ -1539,18 +1552,7 @@ class HotkeySettingTab extends PluginSettingTab {
 											name: a.name.replace(/^Tool: /, ""),
 											desc: a.id === "delete" ? "Only with something selected." : "",
 											aliases: ["tool", "letter", "key"],
-											control: {
-												type: "text",
-												key: `toolKey:${a.id}`,
-												placeholder: "none",
-												validate: (v) => {
-													const x = v.trim().toUpperCase();
-													if (x && !/^[A-Z]$/.test(x)) return "Type one letter, or leave it empty";
-													const other = Object.entries(this.plugin.settings.toolKeys).find(([id, k]) => id !== a.id && k?.toUpperCase() === x);
-													if (x && other) return `${x} is already used`;
-													return undefined;
-												},
-											},
+											render: (setting) => this.renderToolKey(setting, a),
 										}),
 									),
 							},
@@ -1634,6 +1636,69 @@ class HotkeySettingTab extends PluginSettingTab {
 		];
 	}
 
+	/** A button that shows the tool's key; click it, then press a key or combo. */
+	private renderToolKey(setting: Setting, a: Action) {
+		const keys = this.plugin.settings.toolKeys;
+		let show = () => {};
+		setting.addButton((b) => {
+			show = () => b.setButtonText(keys[a.id] || "None");
+			show();
+			b.onClick(() => {
+				// Only one button waits for a key at a time.
+				stopRecording?.();
+				b.setButtonText("Press a key...");
+				const win = b.buttonEl.win;
+				// Obsidian's own keyboard scope, so Escape cancels here instead of leaving the page.
+				const scope = new Scope();
+				scope.register(null, null, (e) => {
+					onKey(e);
+					return false;
+				});
+				const finish = () => {
+					this.app.keymap.popScope(scope);
+					win.removeEventListener("mousedown", onMouse, true);
+					win.removeEventListener("blur", finish);
+					if (stopRecording === finish) stopRecording = null;
+					if (b.buttonEl.isConnected) show();
+				};
+				const onKey = (e: KeyboardEvent) => {
+					// The page was redrawn: this button is gone, so stop listening.
+					if (!b.buttonEl.isConnected) return finish();
+					if (e.key === "Escape") return finish();
+					const combo = comboOf(e);
+					if (!combo) return;
+					const other = this.plugin.actions.find((x) => x.id !== a.id && keys[x.id]?.toUpperCase() === combo.toUpperCase());
+					if (other) {
+						new Notice(`${combo} is already used by ${other.name.replace(/^Tool: /, "")}`);
+						return finish();
+					}
+					keys[a.id] = combo;
+					void this.plugin.saveSettings();
+					finish();
+				};
+				// A click anywhere else stops the waiting.
+				const onMouse = (e: MouseEvent) => {
+					if (e.target !== b.buttonEl) finish();
+				};
+				stopRecording = finish;
+				this.app.keymap.pushScope(scope);
+				win.addEventListener("mousedown", onMouse, true);
+				win.addEventListener("blur", finish);
+			});
+		});
+		setting.addExtraButton((x) =>
+			x
+				.setIcon("x")
+				.setTooltip("No key")
+				.onClick(() => {
+					stopRecording?.();
+					keys[a.id] = "";
+					void this.plugin.saveSettings();
+					show();
+				}),
+		);
+	}
+
 	/** One row per colour: its key, how it looks in the drawing, a picker and a reset. */
 	private colourGroup(heading: string, kind: "stroke" | "fill"): SettingDefinitionItem {
 		const st = this.plugin.settings;
@@ -1683,19 +1748,11 @@ class HotkeySettingTab extends PluginSettingTab {
 
 	getControlValue(key: string): unknown {
 		if (key === "zoomPresets") return this.plugin.settings.zoomPresets.join(", ");
-		if (key.startsWith("toolKey:")) return this.plugin.settings.toolKeys[key.slice(8)] ?? "";
 		return this.plugin.settings[key as keyof HotkeySettings];
 	}
 
 	async setControlValue(key: string, value: unknown): Promise<void> {
 		const st = this.plugin.settings;
-		if (key.startsWith("toolKey:")) {
-			const x = String(value).trim().toUpperCase();
-			if (x && !/^[A-Z]$/.test(x)) return;
-			st.toolKeys[key.slice(8)] = x;
-			await this.plugin.saveSettings();
-			return;
-		}
 		if (key === "zoomPresets") {
 			const nums = parseZoomPresets(String(value));
 			if (nums.length === 0) return;

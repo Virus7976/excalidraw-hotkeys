@@ -49,14 +49,14 @@ The suggested keys are all under the left hand, so the right hand stays on the m
 | **Zoom** | |
 | Zoom preset 1–9 | `Ctrl+Alt+1` … `Ctrl+Alt+5` |
 | Zoom in / out to the next preset | `Ctrl+Alt+Z` / `Ctrl+Alt+Shift+Z` |
-| **Tools** (letters, set in Settings → Tool keys) | |
+| **Tools** (set in Settings → Tool keys) | |
 | Select / Rectangle / Diamond / Arrow / Text / Eraser / Frame | `V` / `R` / `D` / `A` / `T` / `E` / `F` |
 | Ellipse (C for circle) / Line (S for straight) / Pen (W for write) | `C` / `S` / `W` |
 | Delete the selection | `X` |
 | **Other** | |
 | Show my hotkeys | none |
 
-Tool letters work only inside a drawing, and never while you type. They are not in Obsidian's Hotkeys list, because a plain letter there would stop that letter from typing in every note. Each tool is also a command, so you can give it a Ctrl or Alt key in Settings → Hotkeys.
+Tool keys work only inside a drawing, and never while you type. To change one, open Settings → Tool keys, click its key, then press any key or combo, like `W` or `Alt+P`. They are not in Obsidian's Hotkeys list, because a plain letter there would stop that letter from typing in every note. Each tool is also a command, so you can give it a Ctrl or Alt key in Settings → Hotkeys.
 
 A command for each single line style, line width, font, font size, align and arrowhead is hidden. Turn on **Show one-by-one commands** to list them too.
 
@@ -77,7 +77,7 @@ Hold two arrow keys to move the selection on a diagonal. Hold Shift too for a bi
 The first page has 6 parts:
 
 - **Keys**: use or reset the suggested keys, Shift goes back, show one-by-one commands, catch keys before Excalidraw, and where the hotkey note goes.
-- **Tool keys**: one letter for each tool. Leave a box empty for no letter.
+- **Tool keys**: a key for each tool. Click a key and press any key or combo. The × button removes it.
 - **Colours**: the 8 pen colours and 8 fill colours, and the status bar colours. Colour 1 is Excalidraw's own ink: white in dark mode, black in light mode. The square next to each colour shows how it looks in the drawing.
 - **Zoom**: the presets, for example `25, 50, 100, 200, 400`, the zoom speed, and zoom on the selection.
 - **Duplicate**: what a copy keeps, and the gap to it.
