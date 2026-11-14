@@ -25,6 +25,8 @@ interface HotkeySettings {
 	showStatusColours: boolean;
 	showOneByOne: boolean;
 	shiftGoesBack: boolean;
+	/** Plain letter per tool command id, used only inside a drawing. */
+	toolKeys: Record<string, string>;
 	diagonalNudge: boolean;
 	nudgeStep: number;
 	nudgeStepShift: number;
@@ -50,6 +52,19 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 	showStatusColours: true,
 	showOneByOne: false,
 	shiftGoesBack: true,
+	toolKeys: {
+		"tool-select": "V",
+		"tool-rectangle": "R",
+		"tool-diamond": "D",
+		"tool-ellipse": "C",
+		"tool-arrow": "A",
+		"tool-line": "S",
+		"tool-pen": "W",
+		"tool-text": "T",
+		"tool-eraser": "E",
+		"tool-frame": "F",
+		delete: "X",
+	},
 	diagonalNudge: true,
 	nudgeStep: 12,
 	nudgeStepShift: 20,
@@ -123,6 +138,7 @@ interface ExcalidrawAPI {
 	getAppState(): AppState;
 	getSceneElementsIncludingDeleted(): El[];
 	updateScene(scene: { elements?: El[]; appState?: Record<string, unknown>; captureUpdate?: string }): void;
+	setActiveTool?(tool: { type: string }): void;
 }
 
 interface EA {
@@ -229,6 +245,19 @@ function withBoundText(c: Ctx): El[] {
 
 async function edit(c: Ctx, els: El[], fn: (el: El) => void) {
 	if (els.length === 0) return;
+	const api = c.ea.getExcalidrawAPI?.();
+	if (c.typing && api) {
+		// The text editor is open: change the scene directly so the editor keeps going.
+		const ids = new Set(els.map((x) => x.id));
+		const elements = api.getSceneElementsIncludingDeleted().map((x: El) => {
+			if (!ids.has(x.id)) return x;
+			const y = { ...x };
+			fn(y);
+			return { ...y, version: (x.version ?? 1) + 1, versionNonce: newSeed() };
+		});
+		api.updateScene({ elements, captureUpdate: "IMMEDIATELY" });
+		return;
+	}
 	c.ea.copyViewElementsToEAforEditing(els);
 	for (const el of c.ea.getElements()) fn(el);
 	await c.ea.addElementsToView(false, true);
@@ -436,6 +465,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.settings.fillColours = [...(saved.fillColours ?? DEFAULT_SETTINGS.fillColours)];
 		this.settings.strokeColours = [...(saved.strokeColours ?? DEFAULT_SETTINGS.strokeColours)];
 		this.settings.zoomPresets = [...(saved.zoomPresets ?? DEFAULT_SETTINGS.zoomPresets)];
+		this.settings.toolKeys = { ...DEFAULT_SETTINGS.toolKeys, ...(saved.toolKeys ?? {}) };
 	}
 
 	async saveSettings() {
@@ -506,19 +536,63 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.pressed.add(e.code);
 
 		if (this.settings.diagonalNudge && this.tryDiagonalNudge(e)) return;
+		if (this.tryToolKey(e)) return;
 		if (!this.settings.catchKeysFirst) return;
 
 		for (const a of this.visibleActions()) {
 			if (!this.hotkeysFor(a.id).some((h) => matches(h, e))) continue;
 			const c = this.context();
 			if (this.justRan === a.id) return;
-			if (!c || (c.typing && !a.whileTyping) || !a.canRun(c)) continue;
+			if (!c || (c.typing && !a.whileTyping)) continue;
+			if (!a.canRun(c)) {
+				// Our key, nothing to change. Keep it from Excalidraw unless another command uses it.
+				if (c.typing || this.otherCommandUses(e)) continue;
+				e.preventDefault();
+				e.stopImmediatePropagation();
+				showInfo(c.selected.length === 0 ? "Select something first" : "This key does not change what is selected");
+				return;
+			}
 			e.preventDefault();
 			e.stopImmediatePropagation();
 			this.markRan(a.id);
 			void a.run(c);
 			return;
 		}
+	}
+
+	/** The tool command whose letter this key is, if any. */
+	toolForKey(e: KeyboardEvent): Action | undefined {
+		if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || !e.code.startsWith("Key")) return undefined;
+		const letter = e.code.slice(3);
+		const id = Object.keys(this.settings.toolKeys).find((k) => this.settings.toolKeys[k]?.toUpperCase() === letter);
+		return id ? this.actions.find((a) => a.id === id) : undefined;
+	}
+
+	// A tool letter: only inside a drawing, and never while typing.
+	private tryToolKey(e: KeyboardEvent): boolean {
+		if (e.repeat) return false;
+		const a = this.toolForKey(e);
+		if (!a) return false;
+		const c = this.context();
+		if (!c || c.typing) return false;
+		e.preventDefault();
+		e.stopImmediatePropagation();
+		if (!a.canRun(c)) showInfo("Select something first");
+		else void a.run(c);
+		return true;
+	}
+
+	/** True when a command from outside this plugin has this key. */
+	private otherCommandUses(e: KeyboardEvent): boolean {
+		const hm = (this.app as AppInternals).hotkeyManager;
+		const mine = `${this.manifest.id}:`;
+		for (const map of [hm?.customKeys, hm?.defaultKeys]) {
+			for (const [id, keys] of Object.entries(map ?? {})) {
+				if (id.startsWith(mine) || !Array.isArray(keys)) continue;
+				if (keys.some((h) => matches(h, e))) return true;
+			}
+		}
+		return false;
 	}
 
 	// Two arrow keys held at once move the selection on a diagonal. Obsidian
@@ -609,6 +683,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 		const list: Action[] = [];
 		// A cycle gets two commands: Alt+key goes forward, Alt+Shift+key goes back.
 		const wrap = (i: number, n: number) => ((i % n) + n) % n;
+		// These also change the text you are typing.
+		const TYPING_CYCLES = ["cycle-align", "cycle-font"];
 		const cycle = (
 			id: string,
 			name: string,
@@ -619,10 +695,12 @@ export default class ExcalidrawHotkeys extends Plugin {
 		) => {
 			// Nothing selected: change the pen instead.
 			const pen = pens[id] as ((c: Ctx, dir: 1 | -1) => void) | undefined;
-			const can = (c: Ctx) => (!!pen && c.selected.length === 0) || canRun(c);
-			const go = (c: Ctx, dir: 1 | -1) => (pen && c.selected.length === 0 ? pen(c, dir) : step(c, dir));
-			list.push({ id, name, group, keys: [hk(["Alt"], key)], canRun: can, run: (c) => go(c, 1) });
-			list.push({ id: `${id}-back`, name: `${name}, back`, group, keys: [hk(["Alt", "Shift"], key)], back: true, canRun: can, run: (c) => go(c, -1) });
+			const usePen = (c: Ctx) => !!pen && !c.typing && c.selected.length === 0;
+			const can = (c: Ctx) => usePen(c) || canRun(c);
+			const go = (c: Ctx, dir: 1 | -1) => (usePen(c) && pen ? pen(c, dir) : step(c, dir));
+			const whileTyping = TYPING_CYCLES.includes(id);
+			list.push({ id, name, group, keys: [hk(["Alt"], key)], whileTyping, canRun: can, run: (c) => go(c, 1) });
+			list.push({ id: `${id}-back`, name: `${name}, back`, group, keys: [hk(["Alt", "Shift"], key)], back: true, whileTyping, canRun: can, run: (c) => go(c, -1) });
 		};
 
 		// The pen: what the next drawn thing gets. Read and set in Excalidraw's app state.
@@ -682,6 +760,10 @@ export default class ExcalidrawHotkeys extends Plugin {
 		};
 
 		// Colour ----------------------------------------------------------------
+		// Things with an inside to fill, and things with a line.
+		const fillable = (c: Ctx) => c.selected.filter((el) => el.type !== "text" && !LINEAR.includes(el.type));
+		const lined = (c: Ctx) => c.selected.filter((el) => el.type !== "text");
+
 		for (let i = 0; i < 8; i++) {
 			const n = i + 1;
 			list.push({
@@ -705,16 +787,12 @@ export default class ExcalidrawHotkeys extends Plugin {
 				name: `Fill colour ${n}`,
 				group: "Colour",
 				keys: [hk(["Alt", "Shift"], String(n))],
-				canRun: always,
-				whileTyping: true,
+				canRun: (c) => c.selected.length === 0 || fillable(c).length > 0,
 				run: async (c) => {
 					const fill = s().fillColours[i];
 					// Fill only ever changes the inside of a shape, never the pen or text colour.
 					setPen(c, {}, { currentItemBackgroundColor: fill }, `Fill colour ${n}`, fill);
-					if (c.typing) return;
-					await edit(c, c.selected, (el) => {
-						if (el.type !== "text" && !LINEAR.includes(el.type)) el.backgroundColor = fill;
-					});
+					await edit(c, fillable(c), (el) => (el.backgroundColor = fill));
 				},
 			});
 		}
@@ -725,11 +803,11 @@ export default class ExcalidrawHotkeys extends Plugin {
 			name: "No line (pen colour 0)",
 			group: "Colour",
 			keys: [hk(["Alt"], "0")],
-			canRun: always,
+			canRun: (c) => c.selected.length === 0 || lined(c).length > 0,
 			run: async (c) => {
 				setPen(c, {}, { currentItemStrokeColor: "transparent" }, "No line", "transparent");
 				// Text with no line would vanish, so text keeps its colour.
-				await edit(c, c.selected.filter((el) => el.type !== "text"), (el) => (el.strokeColor = "transparent"));
+				await edit(c, lined(c), (el) => (el.strokeColor = "transparent"));
 			},
 		});
 		list.push({
@@ -737,10 +815,10 @@ export default class ExcalidrawHotkeys extends Plugin {
 			name: "No fill (fill colour 0)",
 			group: "Colour",
 			keys: [hk(["Alt", "Shift"], "0")],
-			canRun: always,
+			canRun: (c) => c.selected.length === 0 || fillable(c).length > 0,
 			run: async (c) => {
 				setPen(c, {}, { currentItemBackgroundColor: "transparent" }, "No fill", "transparent");
-				await edit(c, c.selected.filter((el) => el.type !== "text" && !LINEAR.includes(el.type)), (el) => (el.backgroundColor = "transparent"));
+				await edit(c, fillable(c), (el) => (el.backgroundColor = "transparent"));
 			},
 		});
 
@@ -771,20 +849,23 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 		list.push({
 			id: "reset-colours",
-			name: "Reset to black with no fill",
+			name: "Reset colours (pen colour 1, no fill)",
 			group: "Colour",
 			keys: [hk(["Mod"], "`")],
-			canRun: hasSelection,
-			run: (c) =>
-				edit(c, withBoundText(c), (el) => {
-					el.strokeColor = "#000000";
+			canRun: always,
+			run: (c) => {
+				const ink = s().strokeColours[0];
+				setPen(c, {}, { currentItemStrokeColor: ink, currentItemBackgroundColor: "transparent" }, "Pen colour 1, no fill", ink);
+				return edit(c, withBoundText(c), (el) => {
+					el.strokeColor = ink;
 					el.backgroundColor = "transparent";
 					if (el.type === "text") {
 						el.text = stripBlockRef(el.text);
 						el.rawText = stripBlockRef(el.rawText);
 						el.originalText = stripBlockRef(el.originalText);
 					}
-				}),
+				});
+			},
 		});
 
 		const opacityStep = (up: boolean): Action => ({
@@ -877,10 +958,18 @@ export default class ExcalidrawHotkeys extends Plugin {
 		}
 
 		// Text --------------------------------------------------------------------
-		const texts = (c: Ctx) => withBoundText(c).filter((el) => el.type === "text");
+		const texts = (c: Ctx): El[] => {
+			if (c.typing) {
+				const id = c.typing.id;
+				const live = c.ea.getExcalidrawAPI?.()?.getSceneElementsIncludingDeleted().find((x: El) => x.id === id);
+				return live ? [live] : [];
+			}
+			return withBoundText(c).filter((el) => el.type === "text");
+		};
 		const editText = async (c: Ctx, fn: (el: El) => void) => {
 			const els = texts(c);
 			if (els.length === 0) return;
+			if (c.typing) return edit(c, els, fn);
 			c.ea.copyViewElementsToEAforEditing(els);
 			for (const el of c.ea.getElements()) {
 				fn(el);
@@ -926,6 +1015,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				name: up ? "Font size up (small, medium, large, very large)" : "Font size down",
 				group: "Text",
 				keys: [up ? hk(["Alt"], "G") : hk(["Alt", "Shift"], "G")],
+				whileTyping: true,
 				canRun: (c) => c.selected.length === 0 || texts(c).length > 0,
 				// Step through the 4 sizes. Past the ends, grow or shrink by a quarter.
 				run: (c) => {
@@ -934,7 +1024,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 						up
 							? (sizes.find((x) => x > now) ?? Math.round(now * 1.25))
 							: ([...sizes].reverse().find((x) => x < now) ?? Math.max(8, Math.round(now * 0.8)));
-					if (c.selected.length === 0) {
+					if (c.selected.length === 0 && !c.typing) {
 						const v = stepFrom((penGet(c, "currentItemFontSize") as number) ?? 20);
 						const name = FONT_SIZES.find((x) => x[1] === v)?.[0] ?? String(v);
 						return penSet(c, { currentItemFontSize: v }, `font size ${name}`);
@@ -1109,13 +1199,29 @@ export default class ExcalidrawHotkeys extends Plugin {
 				name: `${word} size or line width`,
 				group: "Size",
 				keys: [hk(mods, "R")],
-				// All text selected: let Excalidraw change the font size instead.
-				canRun: (c) => c.selected.some((el) => el.type !== "text"),
-				run: (c) =>
-					edit(c, c.selected, (el) => {
-						if (el.type === "arrow" || el.type === "line") {
+				canRun: hasSelection,
+				run: async (c) => {
+					// Loose text: the next font size. A text in a box grows with its box.
+					const sizes = FONT_SIZES.map((x) => x[1]);
+					const nextSize = (now: number) =>
+						grow
+							? (sizes.find((x) => x > now) ?? Math.round(now * 1.25))
+							: ([...sizes].reverse().find((x) => x < now) ?? Math.max(8, Math.round(now * 0.8)));
+					const loose = c.selected.filter((el) => el.type === "text");
+					if (loose.length > 0) {
+						c.ea.copyViewElementsToEAforEditing(loose);
+						for (const el of c.ea.getElements()) {
+							el.fontSize = nextSize(el.fontSize);
+							c.ea.refreshTextElementSize?.(el.id);
+						}
+						await c.ea.addElementsToView(false, true);
+					}
+					const rest = c.selected.filter((el) => el.type !== "text");
+					if (rest.length === 0) return;
+					await edit(c, rest, (el) => {
+						if (LINEAR.includes(el.type)) {
 							el.strokeWidth = Math.max(1, (el.strokeWidth ?? 1) + (grow ? 1 : -1));
-						} else if (el.type !== "text" && el.type !== "freedraw") {
+						} else {
 							const f = factor(grow);
 							const w = el.width * f;
 							const h = el.height * f;
@@ -1124,9 +1230,47 @@ export default class ExcalidrawHotkeys extends Plugin {
 							el.width = w;
 							el.height = h;
 						}
-					}),
+					});
+				},
 			});
 		}
+
+		// Tools -------------------------------------------------------------------
+		// Their plain letters live in Settings, Tool keys, not in Obsidian's Hotkeys.
+		const TOOLS: [string, string, string][] = [
+			["selection", "select", "Select"],
+			["hand", "hand", "Hand (move the view)"],
+			["rectangle", "rectangle", "Rectangle"],
+			["diamond", "diamond", "Diamond"],
+			["ellipse", "ellipse", "Ellipse"],
+			["arrow", "arrow", "Arrow"],
+			["line", "line", "Line"],
+			["freedraw", "pen", "Pen"],
+			["text", "text", "Text"],
+			["eraser", "eraser", "Eraser"],
+			["laser", "laser", "Laser pointer"],
+			["frame", "frame", "Frame"],
+		];
+		for (const [type, id, name] of TOOLS) {
+			list.push({
+				id: `tool-${id}`,
+				name: `Tool: ${name}`,
+				group: "Tools",
+				canRun: always,
+				run: (c) => c.ea.getExcalidrawAPI?.()?.setActiveTool?.({ type }),
+			});
+		}
+		list.push({
+			id: "delete",
+			name: "Delete the selection",
+			group: "Tools",
+			canRun: hasSelection,
+			run: () => {
+				// Let Excalidraw run its own Delete, so bound text and arrows go too.
+				const target = (activeDocument.activeElement as HTMLElement | null) ?? activeDocument.body;
+				target.dispatchEvent(new KeyboardEvent("keydown", { key: "Delete", code: "Delete", bubbles: true, cancelable: true }));
+			},
+		});
 
 		// Zoom --------------------------------------------------------------------
 		for (let i = 0; i < ZOOM_SLOTS; i++) {
@@ -1182,7 +1326,10 @@ function hotkeyRows(plugin: ExcalidrawHotkeys) {
 		...plugin.visibleActions().map((a) => ({ id: a.id, name: a.name, group: a.group })),
 		{ id: "show-hotkeys", name: "Show my hotkeys", group: "Other" },
 	];
-	return all.map((r) => ({ ...r, keys: plugin.hotkeysFor(r.id).map(hotkeyLabel) }));
+	return all.map((r) => {
+		const letter = plugin.settings.toolKeys[r.id];
+		return { ...r, keys: [...(letter ? [letter.toUpperCase()] : []), ...plugin.hotkeysFor(r.id).map(hotkeyLabel)] };
+	});
 }
 
 function hotkeyMarkdown(plugin: ExcalidrawHotkeys): string {
@@ -1361,6 +1508,56 @@ class HotkeySettingTab extends PluginSettingTab {
 					},
 					{
 						type: "page",
+						name: "Tool keys",
+						desc: "One letter for each tool. They work only in a drawing, never while you type.",
+						displayValue: () =>
+							Object.entries(this.plugin.settings.toolKeys)
+								.filter(([, v]) => v)
+								.map(([, v]) => v.toUpperCase())
+								.join(" "),
+						items: [
+							{
+								type: "group",
+								items: [
+									{
+										name: "Reset tool keys",
+										desc: "Put back the suggested letters.",
+										action: () => {
+											this.plugin.settings.toolKeys = { ...DEFAULT_SETTINGS.toolKeys };
+											void this.plugin.saveSettings().then(() => this.update());
+										},
+									},
+								],
+							},
+							{
+								type: "group",
+								heading: "Letters",
+								items: this.plugin.actions
+									.filter((a) => a.group === "Tools")
+									.map(
+										(a): SettingDefinition => ({
+											name: a.name.replace(/^Tool: /, ""),
+											desc: a.id === "delete" ? "Only with something selected." : "",
+											aliases: ["tool", "letter", "key"],
+											control: {
+												type: "text",
+												key: `toolKey:${a.id}`,
+												placeholder: "none",
+												validate: (v) => {
+													const x = v.trim().toUpperCase();
+													if (x && !/^[A-Z]$/.test(x)) return "Type one letter, or leave it empty";
+													const other = Object.entries(this.plugin.settings.toolKeys).find(([id, k]) => id !== a.id && k?.toUpperCase() === x);
+													if (x && other) return `${x} is already used`;
+													return undefined;
+												},
+											},
+										}),
+									),
+							},
+						],
+					},
+					{
+						type: "page",
 						name: "Colours",
 						desc: "The 8 pen colours and 8 fill colours.",
 						items: [
@@ -1486,11 +1683,19 @@ class HotkeySettingTab extends PluginSettingTab {
 
 	getControlValue(key: string): unknown {
 		if (key === "zoomPresets") return this.plugin.settings.zoomPresets.join(", ");
+		if (key.startsWith("toolKey:")) return this.plugin.settings.toolKeys[key.slice(8)] ?? "";
 		return this.plugin.settings[key as keyof HotkeySettings];
 	}
 
 	async setControlValue(key: string, value: unknown): Promise<void> {
 		const st = this.plugin.settings;
+		if (key.startsWith("toolKey:")) {
+			const x = String(value).trim().toUpperCase();
+			if (x && !/^[A-Z]$/.test(x)) return;
+			st.toolKeys[key.slice(8)] = x;
+			await this.plugin.saveSettings();
+			return;
+		}
 		if (key === "zoomPresets") {
 			const nums = parseZoomPresets(String(value));
 			if (nums.length === 0) return;

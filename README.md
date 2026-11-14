@@ -49,8 +49,14 @@ The suggested keys are all under the left hand, so the right hand stays on the m
 | **Zoom** | |
 | Zoom preset 1–9 | `Ctrl+Alt+1` … `Ctrl+Alt+5` |
 | Zoom in / out to the next preset | `Ctrl+Alt+Z` / `Ctrl+Alt+Shift+Z` |
+| **Tools** (letters, set in Settings → Tool keys) | |
+| Select / Rectangle / Diamond / Arrow / Text / Eraser / Frame | `V` / `R` / `D` / `A` / `T` / `E` / `F` |
+| Ellipse (C for circle) / Line (S for straight) / Pen (W for write) | `C` / `S` / `W` |
+| Delete the selection | `X` |
 | **Other** | |
 | Show my hotkeys | none |
+
+Tool letters work only inside a drawing, and never while you type. They are not in Obsidian's Hotkeys list, because a plain letter there would stop that letter from typing in every note. Each tool is also a command, so you can give it a Ctrl or Alt key in Settings → Hotkeys.
 
 A command for each single line style, line width, font, font size, align and arrowhead is hidden. Turn on **Show one-by-one commands** to list them too.
 
@@ -59,8 +65,8 @@ A command for each single line style, line width, font, font size, align and arr
 Colour and style keys work on what you are using:
 
 - **Something selected:** the key changes it. Your pen stays the same.
-- **Nothing selected:** the key changes your pen, so the next thing you draw or write gets it. This works for colour, line width, line style, fill style, arrowheads, font, font size, align and opacity. A short popup says what changed.
-- **Typing a text:** the colour keys colour that text.
+- **Nothing selected:** the key changes your pen, so the next thing you draw or write gets it. This works for colour, line width, line style, fill style, arrowheads, font, font size, align and opacity. A key that has nothing to change says so, and does nothing else. A short popup says what changed.
+- **Typing a text:** colour, font, font size and align keys change that text.
 
 Pen keys change lines, arrows and text. Fill keys change only the inside of boxes, circles and diamonds. Each colour key shows a short popup with the colour. The status bar at the bottom right shows your pen and fill colour while a drawing is open.
 
@@ -68,9 +74,10 @@ Hold two arrow keys to move the selection on a diagonal. Hold Shift too for a bi
 
 ## Settings
 
-The first page has 5 parts:
+The first page has 6 parts:
 
 - **Keys**: use or reset the suggested keys, Shift goes back, show one-by-one commands, catch keys before Excalidraw, and where the hotkey note goes.
+- **Tool keys**: one letter for each tool. Leave a box empty for no letter.
 - **Colours**: the 8 pen colours and 8 fill colours, and the status bar colours. Colour 1 is Excalidraw's own ink: white in dark mode, black in light mode. The square next to each colour shows how it looks in the drawing.
 - **Zoom**: the presets, for example `25, 50, 100, 200, 400`, the zoom speed, and zoom on the selection.
 - **Duplicate**: what a copy keeps, and the gap to it.
