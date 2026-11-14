@@ -8,7 +8,8 @@ import {
 	Platform,
 	Plugin,
 	PluginSettingTab,
-	Setting,
+	SettingDefinition,
+	SettingDefinitionItem,
 	TFile,
 	normalizePath,
 } from "obsidian";
@@ -60,11 +61,101 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 // Types
 // ---------------------------------------------------------------------------
 
-// ExcalidrawAutomate and its elements are untyped here on purpose: the
-// Excalidraw plugin does not ship types we can depend on.
-/* eslint-disable @typescript-eslint/no-explicit-any */
-type EA = any;
-type El = any;
+// The Excalidraw plugin ships no types we can depend on, so these describe
+// only the parts of its API that this plugin uses.
+
+interface BoundRef {
+	id: string;
+	type: string;
+}
+
+interface El {
+	id: string;
+	type: string;
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+	strokeColor: string;
+	backgroundColor: string;
+	fillStyle?: string;
+	strokeStyle?: string;
+	strokeWidth?: number;
+	opacity?: number;
+	roughness?: number;
+	textAlign?: string;
+	text?: string;
+	rawText?: string;
+	originalText?: string;
+	fontSize: number;
+	fontFamily: number;
+	containerId?: string | null;
+	boundElements?: BoundRef[] | null;
+	groupIds?: string[];
+	seed?: number;
+	version?: number;
+	versionNonce?: number;
+	isDeleted?: boolean;
+	startArrowhead?: string | null;
+	endArrowhead?: string | null;
+}
+
+interface AppState {
+	zoom: { value: number };
+	scrollX: number;
+	scrollY: number;
+	width: number;
+	height: number;
+}
+
+interface ExcalidrawAPI {
+	getAppState(): AppState;
+	getSceneElementsIncludingDeleted(): El[];
+	updateScene(scene: { elements?: El[]; appState?: Record<string, unknown>; captureUpdate?: string }): void;
+}
+
+interface EA {
+	elementsDict: Record<string, El>;
+	style: { strokeColor: string; strokeWidth: number; roughness: number };
+	getViewSelectedElements(): El[];
+	getViewElements(): El[];
+	copyViewElementsToEAforEditing(els: El[]): void;
+	getElements(): El[];
+	getElement(id: string): El;
+	addElementsToView(repositionToCursor: boolean, save: boolean): Promise<boolean>;
+	refreshTextElementSize?(id: string): void;
+	getExcalidrawAPI?(): ExcalidrawAPI | null;
+	connectObjects(
+		a: string,
+		ca: string | null,
+		b: string,
+		cb: string | null,
+		formatting: { startArrowHead: string | null; endArrowHead: string | null; numberOfPoints: number },
+	): string;
+}
+
+interface HotkeyManager {
+	customKeys?: Record<string, Hotkey[]>;
+	defaultKeys?: Record<string, Hotkey[]>;
+	setHotkeys?(id: string, keys: Hotkey[]): void;
+	save?(): Promise<void> | void;
+	bake?(): void;
+}
+
+interface SettingWindow {
+	open(): void;
+	openTabById(id: string): void;
+	activeTab?: { searchComponent?: { setValue(v: string): void }; updateHotkeyVisibility?(): void };
+}
+
+/** Internal parts of App that Obsidian does not type. */
+type AppInternals = App & { hotkeyManager?: HotkeyManager; setting?: SettingWindow };
+
+declare global {
+	interface Window {
+		ExcalidrawAutomate?: { getAPI(view: unknown): EA };
+	}
+}
 
 interface Ctx {
 	ea: EA;
@@ -176,9 +267,10 @@ export default class ExcalidrawHotkeys extends Plugin {
 	settings: HotkeySettings = DEFAULT_SETTINGS;
 	actions: Action[] = [];
 	private pressed = new Set<string>();
-	// The keydown that already ran a command. Obsidian's hotkey handler and our
-	// own capture listener can both see one key press; this stops a double run.
-	private handled: Event | null = null;
+	// The command that just ran. Obsidian's hotkey handler and our own capture
+	// listener can both see one key press; this stops a double run. It clears
+	// once the key event is done.
+	private justRan: string | null = null;
 	private zoomFrame = 0;
 	private zoomGoal: number | null = null;
 
@@ -191,12 +283,11 @@ export default class ExcalidrawHotkeys extends Plugin {
 				id: a.id,
 				name: a.name,
 				checkCallback: (checking) => {
-					const ev = (window as any).event as Event | undefined;
-					if (ev && ev === this.handled) return true;
+					if (this.justRan === a.id) return true;
 					const c = this.context();
 					if (!c || !a.canRun(c)) return false;
 					if (!checking) {
-						this.handled = ev ?? null;
+						this.markRan(a.id);
 						void a.run(c);
 					}
 					return true;
@@ -218,11 +309,11 @@ export default class ExcalidrawHotkeys extends Plugin {
 	}
 
 	onunload() {
-		cancelAnimationFrame(this.zoomFrame);
+		window.cancelAnimationFrame(this.zoomFrame);
 	}
 
 	async loadSettings() {
-		const saved = (await this.loadData()) ?? {};
+		const saved = ((await this.loadData()) ?? {}) as Partial<HotkeySettings>;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
 		this.settings.fillColours = [...(saved.fillColours ?? DEFAULT_SETTINGS.fillColours)];
 		this.settings.strokeColours = [...(saved.strokeColours ?? DEFAULT_SETTINGS.strokeColours)];
@@ -238,7 +329,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		const view = this.app.workspace.getActiveViewOfType(ItemView);
 		if (!view || view.getViewType() !== "excalidraw") return null;
 
-		const active = document.activeElement as HTMLElement | null;
+		const active = activeDocument.activeElement as HTMLElement | null;
 		if (
 			active &&
 			(active.tagName === "TEXTAREA" ||
@@ -248,7 +339,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		)
 			return null;
 
-		const EAglobal = (window as any).ExcalidrawAutomate;
+		const EAglobal = window.ExcalidrawAutomate;
 		if (!EAglobal?.getAPI) return null;
 		const ea = EAglobal.getAPI(view);
 		return { ea, selected: ea.getViewSelectedElements() ?? [], all: ea.getViewElements() ?? [] };
@@ -256,7 +347,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 	/** The keys set in Settings, Hotkeys. */
 	hotkeysFor(id: string): Hotkey[] {
-		const hm = (this.app as any).hotkeyManager;
+		const hm = (this.app as AppInternals).hotkeyManager;
 		const full = `${this.manifest.id}:${id}`;
 		const custom = hm?.customKeys?.[full];
 		if (Array.isArray(custom)) return custom;
@@ -267,7 +358,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 	/** Give each command its suggested key, unless the user already set one. */
 	async applySuggestedKeys(): Promise<number> {
-		const hm = (this.app as any).hotkeyManager;
+		const hm = (this.app as AppInternals).hotkeyManager;
 		if (!hm?.setHotkeys) return 0;
 		let n = 0;
 		for (const a of this.actions) {
@@ -281,9 +372,13 @@ export default class ExcalidrawHotkeys extends Plugin {
 		return n;
 	}
 
+	private markRan(id: string) {
+		this.justRan = id;
+		window.setTimeout(() => (this.justRan = null), 0);
+	}
+
 	private onKeyDown(e: KeyboardEvent) {
 		this.pressed.add(e.code);
-		if (e === this.handled) return;
 
 		if (this.settings.diagonalNudge && this.tryDiagonalNudge(e)) return;
 		if (!this.settings.catchKeysFirst) return;
@@ -291,10 +386,11 @@ export default class ExcalidrawHotkeys extends Plugin {
 		for (const a of this.actions) {
 			if (!this.hotkeysFor(a.id).some((h) => matches(h, e))) continue;
 			const c = this.context();
+			if (this.justRan === a.id) return;
 			if (!c || !a.canRun(c)) continue;
 			e.preventDefault();
 			e.stopImmediatePropagation();
-			this.handled = e;
+			this.markRan(a.id);
 			void a.run(c);
 			return;
 		}
@@ -311,7 +407,6 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 		e.preventDefault();
 		e.stopImmediatePropagation();
-		this.handled = e;
 		const d = e.shiftKey ? this.settings.nudgeStepShift : this.settings.nudgeStep;
 		let dx = 0;
 		let dy = 0;
@@ -348,10 +443,10 @@ export default class ExcalidrawHotkeys extends Plugin {
 			to = { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
 		}
 
-		cancelAnimationFrame(this.zoomFrame);
+		window.cancelAnimationFrame(this.zoomFrame);
 		this.zoomGoal = goal;
 		// A hidden window gets no animation frames, so jump straight there.
-		const ms = document.hidden ? 0 : this.settings.zoomMs;
+		const ms = activeDocument.hidden ? 0 : this.settings.zoomMs;
 		const start = performance.now();
 		const ease = (p: number) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
 
@@ -363,11 +458,11 @@ export default class ExcalidrawHotkeys extends Plugin {
 			const cx = from.x + (to.x - from.x) * k;
 			const cy = from.y + (to.y - from.y) * k;
 			api.updateScene({ appState: { zoom: { value: z }, scrollX: w / 2 / z - cx, scrollY: h / 2 / z - cy } });
-			if (p < 1) this.zoomFrame = requestAnimationFrame(frame);
+			if (p < 1) this.zoomFrame = window.requestAnimationFrame(frame);
 			else this.zoomGoal = null;
 		};
 		if (ms <= 0) frame(start);
-		else this.zoomFrame = requestAnimationFrame(frame);
+		else this.zoomFrame = window.requestAnimationFrame(frame);
 	}
 
 	private currentZoom(c: Ctx): number {
@@ -384,7 +479,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 	private buildActions(): Action[] {
 		const s = () => this.settings;
-		const any = (c: Ctx) => c.selected.length > 0;
+		const hasSelection = (c: Ctx) => c.selected.length > 0;
 		const always = () => true;
 		const list: Action[] = [];
 
@@ -396,7 +491,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				name: `Stroke colour ${n}`,
 				group: "Colour",
 				keys: [hk(["Alt", "Shift"], String(n))],
-				canRun: any,
+				canRun: hasSelection,
 				run: (c) =>
 					edit(c, withBoundText(c), (el) => {
 						el.strokeColor = s().strokeColours[i];
@@ -410,7 +505,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				name: `Fill colour ${n}`,
 				group: "Colour",
 				keys: [hk(["Alt"], String(n))],
-				canRun: any,
+				canRun: hasSelection,
 				run: (c) =>
 					edit(c, c.selected, (el) => {
 						if (el.type === "text") el.strokeColor = s().strokeColours[i];
@@ -445,7 +540,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 			name: "Reset to black with no fill",
 			group: "Colour",
 			keys: [hk(["Mod"], "`")],
-			canRun: any,
+			canRun: hasSelection,
 			run: (c) =>
 				edit(c, withBoundText(c), (el) => {
 					el.strokeColor = "#000000";
@@ -463,7 +558,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 			name: up ? "More opaque" : "More see-through",
 			group: "Colour",
 			keys: [hk(["Alt"], up ? "=" : "-")],
-			canRun: any,
+			canRun: hasSelection,
 			run: (c) =>
 				edit(c, withBoundText(c), (el) => {
 					el.opacity = clamp(Math.round(((el.opacity ?? 100) + (up ? 10 : -10)) / 10) * 10, 10, 100);
@@ -515,7 +610,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 			run: (c) => {
 				const els = lineTargets(c);
 				const widths = LINE_WIDTHS.map((w) => w[2]);
-				const i = widths.indexOf(els[0].strokeWidth);
+				const i = widths.indexOf(els[0].strokeWidth ?? 1);
 				const next = widths[(i + 1) % widths.length];
 				return edit(c, els, (el) => (el.strokeWidth = next));
 			},
@@ -607,7 +702,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		});
 
 		const withText = (c: Ctx) =>
-			c.selected.filter((el) => (el.boundElements ?? []).some((b: El) => b.type === "text"));
+			c.selected.filter((el) => (el.boundElements ?? []).some((b) => b.type === "text"));
 		list.push({
 			id: "fit-box-to-text",
 			name: "Fit box to text",
@@ -641,7 +736,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 					!(el.type === "text" && el.containerId && c.selected.some((x) => x.id === el.containerId)),
 			);
 		const cloneEl = (el: El, ox: number, oy: number): El => {
-			const copy = JSON.parse(JSON.stringify(el));
+			const copy = JSON.parse(JSON.stringify(el)) as El;
 			copy.id = newId();
 			copy.seed = newSeed();
 			copy.versionNonce = newSeed();
@@ -682,9 +777,11 @@ export default class ExcalidrawHotkeys extends Plugin {
 							copy.boundElements = [{ type: "text", id: t.id }];
 						}
 
-						ea.style.strokeColor = el.strokeColor;
-						ea.style.strokeWidth = 1;
-						ea.style.roughness = el.roughness ?? ea.style.roughness;
+						Object.assign(ea.style, {
+							strokeColor: el.strokeColor,
+							strokeWidth: 1,
+							roughness: el.roughness ?? ea.style.roughness,
+						});
 						ea.connectObjects(el.id, null, copy.id, null, {
 							startArrowHead: null,
 							endArrowHead: "arrow",
@@ -693,7 +790,11 @@ export default class ExcalidrawHotkeys extends Plugin {
 					}
 					// One scene update with the copies, arrows and new selection, so one
 					// Ctrl+Z removes the whole duplicate.
-					const api = ea.getExcalidrawAPI();
+					const api = ea.getExcalidrawAPI?.();
+					if (!api) {
+						await ea.addElementsToView(false, true);
+						return;
+					}
 					const changed = new Map<string, El>(ea.getElements().map((x: El) => [x.id, x]));
 					const merged = api.getSceneElementsIncludingDeleted().map((x: El) => {
 						const n = changed.get(x.id);
@@ -802,14 +903,15 @@ export default class ExcalidrawHotkeys extends Plugin {
 // ---------------------------------------------------------------------------
 
 function openHotkeySettings(app: App) {
-	const setting = (app as any).setting;
+	const setting = (app as AppInternals).setting;
+	if (!setting) return;
 	setting.open();
 	setting.openTabById("hotkeys");
-	try {
-		const tab = setting.activeTab;
+	const tab = setting.activeTab;
+	if (tab?.searchComponent && tab.updateHotkeyVisibility) {
 		tab.searchComponent.setValue("Excalidraw Hotkeys");
 		tab.updateHotkeyVisibility();
-	} catch {
+	} else {
 		new Notice("Search for Excalidraw Hotkeys");
 	}
 }
@@ -891,14 +993,15 @@ class HotkeyListModal extends Modal {
 			this.close();
 			openHotkeySettings(this.app);
 		});
-		saveBtn.addEventListener("click", async () => {
+		const saveNote = async () => {
 			const path = normalizePath(this.plugin.settings.notePath || DEFAULT_SETTINGS.notePath);
 			const text = hotkeyMarkdown(this.plugin);
 			const file = this.app.vault.getAbstractFileByPath(path);
 			if (file instanceof TFile) await this.app.vault.modify(file, text);
 			else await this.app.vault.create(path, text);
 			new Notice(`Saved to ${path}`);
-		});
+		};
+		saveBtn.addEventListener("click", () => void saveNote());
 	}
 
 	onClose() {
@@ -910,171 +1013,163 @@ class HotkeyListModal extends Modal {
 // Settings tab
 // ---------------------------------------------------------------------------
 
+type NumberKey = "nudgeStep" | "nudgeStepShift" | "resizePercent" | "duplicateGap" | "fitPadding" | "zoomMs";
+type ToggleKey = "catchKeysFirst" | "diagonalNudge" | "copyText" | "copyFill" | "zoomOnSelection";
+
+function parseZoomPresets(v: string): number[] {
+	return v
+		.split(/[,\s]+/)
+		.map((x) => parseFloat(x))
+		.filter((x) => Number.isFinite(x) && x >= 10 && x <= 3000)
+		.slice(0, ZOOM_SLOTS);
+}
+
 class HotkeySettingTab extends PluginSettingTab {
 	constructor(app: App, private plugin: ExcalidrawHotkeys) {
 		super(app, plugin);
 	}
 
-	display(): void {
-		const { containerEl } = this;
+	// Declared settings, so they show in settings search.
+	getSettingDefinitions(): SettingDefinitionItem[] {
 		const st = this.plugin.settings;
-		const save = () => this.plugin.saveSettings();
-		containerEl.empty();
+		const slider = (name: string, desc: string, key: NumberKey, min: number, max: number, step = 1): SettingDefinition => ({
+			name,
+			desc,
+			control: { type: "slider", key, min, max, step },
+		});
+		const toggle = (name: string, desc: string, key: ToggleKey): SettingDefinition => ({
+			name,
+			desc,
+			control: { type: "toggle", key },
+		});
 
-		new Setting(containerEl)
-			.setName("Hotkeys")
-			.setDesc("Set the keys for every command.")
-			.addButton((b) => b.setButtonText("Show my hotkeys").onClick(() => new HotkeyListModal(this.app, this.plugin).open()))
-			.addButton((b) => b.setButtonText("Change keys").onClick(() => openHotkeySettings(this.app)));
-
-		new Setting(containerEl)
-			.setName("Use suggested keys")
-			.setDesc("Give each command without a key its suggested key.")
-			.addButton((b) =>
-				b.setButtonText("Use suggested keys").onClick(async () => {
-					const n = await this.plugin.applySuggestedKeys();
-					new Notice(n === 0 ? "Every command already has a key" : `Set ${n} keys`);
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName("Catch keys before Excalidraw")
-			.setDesc("Run these hotkeys before Excalidraw's own keys can use them.")
-			.addToggle((t) =>
-				t.setValue(st.catchKeysFirst).onChange(async (v) => {
-					st.catchKeysFirst = v;
-					await save();
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName("Hotkey note")
-			.setDesc("Where Save as note writes the list.")
-			.addText((t) =>
-				t.setValue(st.notePath).onChange(async (v) => {
-					st.notePath = v.trim() || DEFAULT_SETTINGS.notePath;
-					await save();
-				}),
-			);
-
-		new Setting(containerEl).setName("Zoom").setHeading();
-		new Setting(containerEl)
-			.setName("Zoom presets")
-			.setDesc(`Percent, separated by commas. Up to ${ZOOM_SLOTS}. Preset 1 is the first number.`)
-			.addText((t) =>
-				t
-					.setPlaceholder("25, 50, 100, 200, 400")
-					.setValue(st.zoomPresets.join(", "))
-					.onChange(async (v) => {
-						const nums = v
-							.split(/[,\s]+/)
-							.map((x) => parseFloat(x))
-							.filter((x) => Number.isFinite(x) && x >= 10 && x <= 3000)
-							.slice(0, ZOOM_SLOTS);
-						if (nums.length === 0) return;
-						st.zoomPresets = nums;
-						await save();
+		return [
+			{
+				type: "group",
+				items: [
+					{
+						name: "Show my hotkeys",
+						desc: "See the key for every command.",
+						action: () => new HotkeyListModal(this.app, this.plugin).open(),
+					},
+					{
+						name: "Change keys",
+						desc: "Open Settings, Hotkeys for this plugin.",
+						action: () => openHotkeySettings(this.app),
+					},
+					{
+						name: "Use suggested keys",
+						desc: "Give each command without a key its suggested key.",
+						action: () => {
+							void this.plugin.applySuggestedKeys().then((n) => {
+								new Notice(n === 0 ? "Every command already has a key" : `Set ${n} keys`);
+							});
+						},
+					},
+					toggle("Catch keys before Excalidraw", "Run these hotkeys before Excalidraw's own keys can use them.", "catchKeysFirst"),
+					{
+						name: "Hotkey note",
+						desc: "Where Save as note writes the list.",
+						control: { type: "text", key: "notePath", placeholder: DEFAULT_SETTINGS.notePath },
+					},
+				],
+			},
+			{
+				type: "group",
+				heading: "Zoom",
+				items: [
+					{
+						name: "Zoom presets",
+						desc: `Percent, separated by commas. Up to ${ZOOM_SLOTS}. Preset 1 is the first number.`,
+						control: {
+							type: "text",
+							key: "zoomPresets",
+							placeholder: "25, 50, 100, 200, 400",
+							validate: (v) => (parseZoomPresets(v).length === 0 ? "Type at least one percent from 10 to 3000" : undefined),
+						},
+					},
+					slider("Zoom speed", "Milliseconds for one zoom. 0 is instant.", "zoomMs", 0, 1500, 50),
+					toggle("Zoom on the selection", "With something selected, zoom moves to it.", "zoomOnSelection"),
+				],
+			},
+			{
+				type: "group",
+				heading: "Colours",
+				items: COLOUR_NAMES.map(
+					(colour, i): SettingDefinition => ({
+						name: `${i + 1}. ${colour}`,
+						desc: "Fill, then stroke and text.",
+						aliases: ["colour", "color", "fill", "stroke"],
+						render: (setting) => {
+							setting
+								.addColorPicker((p) =>
+									p.setValue(st.fillColours[i]).onChange(async (v) => {
+										st.fillColours[i] = v;
+										await this.plugin.saveSettings();
+									}),
+								)
+								.addColorPicker((p) =>
+									p.setValue(st.strokeColours[i]).onChange(async (v) => {
+										st.strokeColours[i] = v;
+										await this.plugin.saveSettings();
+									}),
+								)
+								.addExtraButton((b) =>
+									b
+										.setIcon("rotate-ccw")
+										.setTooltip("Reset")
+										.onClick(async () => {
+											st.fillColours[i] = DEFAULT_SETTINGS.fillColours[i];
+											st.strokeColours[i] = DEFAULT_SETTINGS.strokeColours[i];
+											await this.plugin.saveSettings();
+											this.update();
+										}),
+								);
+						},
 					}),
-			);
-		this.slider(containerEl, "Zoom speed", "Milliseconds for one zoom. 0 is instant.", 0, 1500, "zoomMs", 50);
-		new Setting(containerEl)
-			.setName("Zoom on the selection")
-			.setDesc("With something selected, zoom moves to it.")
-			.addToggle((t) =>
-				t.setValue(st.zoomOnSelection).onChange(async (v) => {
-					st.zoomOnSelection = v;
-					await save();
-				}),
-			);
-
-		new Setting(containerEl).setName("Colours").setHeading();
-		for (let i = 0; i < 8; i++) {
-			new Setting(containerEl)
-				.setName(`${i + 1}. ${COLOUR_NAMES[i]}`)
-				.setDesc("Fill, then stroke and text.")
-				.addColorPicker((p) =>
-					p.setValue(st.fillColours[i]).onChange(async (v) => {
-						st.fillColours[i] = v;
-						await save();
-					}),
-				)
-				.addColorPicker((p) =>
-					p.setValue(st.strokeColours[i]).onChange(async (v) => {
-						st.strokeColours[i] = v;
-						await save();
-					}),
-				)
-				.addExtraButton((b) =>
-					b
-						.setIcon("rotate-ccw")
-						.setTooltip("Reset")
-						.onClick(async () => {
-							st.fillColours[i] = DEFAULT_SETTINGS.fillColours[i];
-							st.strokeColours[i] = DEFAULT_SETTINGS.strokeColours[i];
-							await save();
-							this.display();
-						}),
-				);
-		}
-
-		new Setting(containerEl).setName("Duplicate").setHeading();
-		new Setting(containerEl)
-			.setName("Copy keeps text")
-			.setDesc("The copy gets the same label as the box.")
-			.addToggle((t) =>
-				t.setValue(st.copyText).onChange(async (v) => {
-					st.copyText = v;
-					await save();
-				}),
-			);
-		new Setting(containerEl)
-			.setName("Copy keeps fill")
-			.setDesc("The copy gets the same fill as the box.")
-			.addToggle((t) =>
-				t.setValue(st.copyFill).onChange(async (v) => {
-					st.copyFill = v;
-					await save();
-				}),
-			);
-		this.slider(containerEl, "Duplicate gap", "Space between a box and its copy.", 10, 300, "duplicateGap");
-
-		new Setting(containerEl).setName("Moving and sizing").setHeading();
-		new Setting(containerEl)
-			.setName("Diagonal move")
-			.setDesc("Hold two arrow keys to move the selection on a diagonal.")
-			.addToggle((t) =>
-				t.setValue(st.diagonalNudge).onChange(async (v) => {
-					st.diagonalNudge = v;
-					await save();
-				}),
-			);
-		this.slider(containerEl, "Diagonal step", "Pixels per key press.", 1, 50, "nudgeStep");
-		this.slider(containerEl, "Diagonal step with Shift", "Pixels per key press with Shift held.", 1, 100, "nudgeStepShift");
-		this.slider(containerEl, "Resize step", "Percent per key press.", 1, 50, "resizePercent");
-		this.slider(containerEl, "Fit padding", "Space around the text after Fit box to text.", 0, 100, "fitPadding");
+				),
+			},
+			{
+				type: "group",
+				heading: "Duplicate",
+				items: [
+					toggle("Copy keeps text", "The copy gets the same label as the box.", "copyText"),
+					toggle("Copy keeps fill", "The copy gets the same fill as the box.", "copyFill"),
+					slider("Duplicate gap", "Space between a box and its copy.", "duplicateGap", 10, 300),
+				],
+			},
+			{
+				type: "group",
+				heading: "Moving and sizing",
+				items: [
+					toggle("Diagonal move", "Hold two arrow keys to move the selection on a diagonal.", "diagonalNudge"),
+					slider("Diagonal step", "Pixels per key press.", "nudgeStep", 1, 50),
+					slider("Diagonal step with Shift", "Pixels per key press with Shift held.", "nudgeStepShift", 1, 100),
+					slider("Resize step", "Percent per key press.", "resizePercent", 1, 50),
+					slider("Fit padding", "Space around the text after Fit box to text.", "fitPadding", 0, 100),
+				],
+			},
+		];
 	}
 
-	private slider(
-		el: HTMLElement,
-		name: string,
-		desc: string,
-		min: number,
-		max: number,
-		key: "nudgeStep" | "nudgeStepShift" | "resizePercent" | "duplicateGap" | "fitPadding" | "zoomMs",
-		step = 1,
-	) {
-		new Setting(el)
-			.setName(name)
-			.setDesc(desc)
-			.addSlider((s) =>
-				s
-					.setLimits(min, max, step)
-					.setValue(this.plugin.settings[key])
-					.setDynamicTooltip()
-					.onChange(async (v) => {
-						this.plugin.settings[key] = v;
-						await this.plugin.saveSettings();
-					}),
-			);
+	getControlValue(key: string): unknown {
+		if (key === "zoomPresets") return this.plugin.settings.zoomPresets.join(", ");
+		return this.plugin.settings[key as keyof HotkeySettings];
+	}
+
+	async setControlValue(key: string, value: unknown): Promise<void> {
+		const st = this.plugin.settings;
+		if (key === "zoomPresets") {
+			const nums = parseZoomPresets(String(value));
+			if (nums.length === 0) return;
+			st.zoomPresets = nums;
+		} else if (key === "notePath") {
+			st.notePath = String(value).trim() || DEFAULT_SETTINGS.notePath;
+		} else if (typeof value === "number") {
+			st[key as NumberKey] = value;
+		} else if (typeof value === "boolean") {
+			st[key as ToggleKey] = value;
+		}
+		await this.plugin.saveSettings();
 	}
 }
