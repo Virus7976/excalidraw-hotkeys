@@ -54,13 +54,13 @@ The suggested keys are all under the left hand, so the right hand stays on the m
 
 A command for each single line style, line width, font, font size, align and arrowhead is hidden. Turn on **Show one-by-one commands** to list them too.
 
-## Colour keys
+## How the keys work
 
-The colour keys work on what you are using:
+Colour and style keys work on what you are using:
 
-- **Something selected:** the key colours it. Your pen stays the same.
-- **Nothing selected:** the key changes your pen, so the next thing you draw or write gets that colour.
-- **Typing a text:** the key colours that text.
+- **Something selected:** the key changes it. Your pen stays the same.
+- **Nothing selected:** the key changes your pen, so the next thing you draw or write gets it. This works for colour, line width, line style, fill style, arrowheads, font, font size, align and opacity. A short popup says what changed.
+- **Typing a text:** the colour keys colour that text.
 
 Pen keys change lines, arrows and text. Fill keys change only the inside of boxes, circles and diamonds. Each colour key shows a short popup with the colour. The status bar at the bottom right shows your pen and fill colour while a drawing is open.
 

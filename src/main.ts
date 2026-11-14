@@ -249,6 +249,12 @@ function showColour(label: string, colour: string) {
 	colourNotice = new Notice(frag, 1200);
 }
 
+/** A short popup with text only. Replaces the last one. */
+function showInfo(label: string) {
+	colourNotice?.hide();
+	colourNotice = new Notice(label, 1200);
+}
+
 /**
  * Typing a text: colour that text. Nothing selected: set the pen colour for
  * the next thing drawn. Something selected: the caller colours it, and the pen
@@ -611,8 +617,68 @@ export default class ExcalidrawHotkeys extends Plugin {
 			canRun: (c: Ctx) => boolean,
 			step: (c: Ctx, dir: 1 | -1) => Promise<void> | void,
 		) => {
-			list.push({ id, name, group, keys: [hk(["Alt"], key)], canRun, run: (c) => step(c, 1) });
-			list.push({ id: `${id}-back`, name: `${name}, back`, group, keys: [hk(["Alt", "Shift"], key)], back: true, canRun, run: (c) => step(c, -1) });
+			// Nothing selected: change the pen instead.
+			const pen = pens[id] as ((c: Ctx, dir: 1 | -1) => void) | undefined;
+			const can = (c: Ctx) => (!!pen && c.selected.length === 0) || canRun(c);
+			const go = (c: Ctx, dir: 1 | -1) => (pen && c.selected.length === 0 ? pen(c, dir) : step(c, dir));
+			list.push({ id, name, group, keys: [hk(["Alt"], key)], canRun: can, run: (c) => go(c, 1) });
+			list.push({ id: `${id}-back`, name: `${name}, back`, group, keys: [hk(["Alt", "Shift"], key)], back: true, canRun: can, run: (c) => go(c, -1) });
+		};
+
+		// The pen: what the next drawn thing gets. Read and set in Excalidraw's app state.
+		const penGet = (c: Ctx, key: string): unknown =>
+			(c.ea.getExcalidrawAPI?.()?.getAppState() as unknown as Record<string, unknown> | undefined)?.[key];
+		const penSet = (c: Ctx, patch: Record<string, unknown>, label: string) => {
+			c.ea.getExcalidrawAPI?.()?.updateScene({ appState: patch, captureUpdate: "NEVER" });
+			statusRefresh?.();
+			showInfo(`Pen: ${label}`);
+		};
+		/** Step a pen value through a list, forward or back. */
+		const penCycle = <T,>(c: Ctx, key: string, values: T[], dir: 1 | -1, fallback: T) => {
+			const i = values.indexOf((penGet(c, key) as T) ?? fallback);
+			return values[wrap((i < 0 ? 0 : i) + dir, values.length)];
+		};
+		const pens: Record<string, (c: Ctx, dir: 1 | -1) => void> = {
+			"cycle-line-style": (c, dir) => {
+				const v = penCycle(c, "currentItemStrokeStyle", LINE_STYLES, dir, "solid");
+				penSet(c, { currentItemStrokeStyle: v }, `${v} line`);
+			},
+			"cycle-line-width": (c, dir) => {
+				const widths = LINE_WIDTHS.map((w) => w[2]);
+				const v = penCycle(c, "currentItemStrokeWidth", widths, dir, 1);
+				const name = LINE_WIDTHS.find((w) => w[2] === v)?.[1].toLowerCase() ?? String(v);
+				penSet(c, { currentItemStrokeWidth: v }, `${name} line`);
+			},
+			"cycle-fill-style": (c, dir) => {
+				const now = penGet(c, "currentItemBackgroundColor") === "transparent" ? "none" : ((penGet(c, "currentItemFillStyle") as string) ?? "hachure");
+				const fills = ["none", "hachure", "cross-hatch", "solid"];
+				const v = fills[wrap(fills.indexOf(now) + dir, fills.length)];
+				if (v === "none") return penSet(c, { currentItemBackgroundColor: "transparent" }, "no fill");
+				const patch: Record<string, unknown> = { currentItemFillStyle: v };
+				if (now === "none") patch.currentItemBackgroundColor = this.settings.fillColours[2];
+				penSet(c, patch, `${v} fill`);
+			},
+			"cycle-arrowheads": (c, dir) => {
+				const heads: [string | null, string | null, string][] = [
+					[null, null, "no arrowheads"],
+					[null, "arrow", "end arrowhead"],
+					["arrow", "arrow", "both arrowheads"],
+					["arrow", null, "start arrowhead"],
+				];
+				const s0 = !!penGet(c, "currentItemStartArrowhead");
+				const e0 = !!penGet(c, "currentItemEndArrowhead");
+				const i = Math.max(0, heads.findIndex(([a, b]) => !!a === s0 && !!b === e0));
+				const [start, end, label] = heads[wrap(i + dir, heads.length)];
+				penSet(c, { currentItemStartArrowhead: start, currentItemEndArrowhead: end }, label);
+			},
+			"cycle-align": (c, dir) => {
+				const v = penCycle(c, "currentItemTextAlign", ["left", "center", "right"], dir, "left");
+				penSet(c, { currentItemTextAlign: v }, `align ${v === "center" ? "centre" : v}`);
+			},
+			"cycle-font": (c, dir) => {
+				const v = penCycle(c, "currentItemFontFamily", FONTS.map((x) => x[2]), dir, 5);
+				penSet(c, { currentItemFontFamily: v }, `${FONTS.find((x) => x[2] === v)?.[1].toLowerCase() ?? v} font`);
+			},
 		};
 
 		// Colour ----------------------------------------------------------------
@@ -726,11 +792,15 @@ export default class ExcalidrawHotkeys extends Plugin {
 			name: up ? "More opaque" : "More see-through",
 			group: "Colour",
 			keys: [up ? hk(["Alt", "Shift"], "X") : hk(["Alt"], "X")],
-			canRun: hasSelection,
-			run: (c) =>
-				edit(c, withBoundText(c), (el) => {
-					el.opacity = clamp(Math.round(((el.opacity ?? 100) + (up ? 10 : -10)) / 10) * 10, 10, 100);
-				}),
+			canRun: always,
+			run: (c) => {
+				const step = (o: number) => clamp(Math.round((o + (up ? 10 : -10)) / 10) * 10, 10, 100);
+				if (c.selected.length === 0) {
+					const v = step((penGet(c, "currentItemOpacity") as number) ?? 100);
+					return penSet(c, { currentItemOpacity: v }, `opacity ${v}%`);
+				}
+				return edit(c, withBoundText(c), (el) => (el.opacity = step(el.opacity ?? 100)));
+			},
 		});
 		list.push(opacityStep(false), opacityStep(true));
 
@@ -856,14 +926,20 @@ export default class ExcalidrawHotkeys extends Plugin {
 				name: up ? "Font size up (small, medium, large, very large)" : "Font size down",
 				group: "Text",
 				keys: [up ? hk(["Alt"], "G") : hk(["Alt", "Shift"], "G")],
-				canRun: (c) => texts(c).length > 0,
+				canRun: (c) => c.selected.length === 0 || texts(c).length > 0,
 				// Step through the 4 sizes. Past the ends, grow or shrink by a quarter.
 				run: (c) => {
 					const sizes = FONT_SIZES.map((f) => f[1]);
-					const now = texts(c)[0].fontSize;
-					const next = up
-						? (sizes.find((x) => x > now) ?? Math.round(now * 1.25))
-						: ([...sizes].reverse().find((x) => x < now) ?? Math.max(8, Math.round(now * 0.8)));
+					const stepFrom = (now: number) =>
+						up
+							? (sizes.find((x) => x > now) ?? Math.round(now * 1.25))
+							: ([...sizes].reverse().find((x) => x < now) ?? Math.max(8, Math.round(now * 0.8)));
+					if (c.selected.length === 0) {
+						const v = stepFrom((penGet(c, "currentItemFontSize") as number) ?? 20);
+						const name = FONT_SIZES.find((x) => x[1] === v)?.[0] ?? String(v);
+						return penSet(c, { currentItemFontSize: v }, `font size ${name}`);
+					}
+					const next = stepFrom(texts(c)[0].fontSize);
 					return editText(c, (el) => (el.fontSize = next));
 				},
 			});
