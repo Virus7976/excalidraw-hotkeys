@@ -17,6 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # checkout fetches the tag without its message; get the full tag for the notes.
+      - run: git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
