@@ -49,7 +49,7 @@ Run **Show my hotkeys** at any time to see your keys. Press **Save as note** in 
 | **Other** | |
 | Show my hotkeys | none |
 
-With nothing selected, the stroke and fill keys set the colour for the next thing you draw or write. While you type a text, the stroke keys change the colour of that text. Each colour key shows a short popup with the new colour.
+With nothing selected, the stroke and fill keys set the colour for the next thing you draw or write. While you type a text, the stroke keys change the colour of that text. Each colour key shows a short popup with the new colour. The status bar at the bottom right shows the stroke and fill colour while a drawing is open.
 
 Hold two arrow keys to move the selection on a diagonal. Hold Shift too for a bigger step. This one is not in the Hotkeys menu.
 
@@ -60,6 +60,7 @@ Hold two arrow keys to move the selection on a diagonal. Hold Shift too for a bi
 - **Zoom on the selection**: with something selected, the zoom moves to it.
 - **Colours**: the 8 fill colours and the 8 stroke colours.
 - **Copy keeps text** and **Copy keeps fill**: what a duplicate takes from its box.
+- **Colours in the status bar**: show the stroke and fill colour at the bottom right.
 - **Catch keys before Excalidraw**: keep this on. Excalidraw uses some of these keys for its own functions.
 
 Every edit is one undo step. `Ctrl+Z` undoes a duplicate with its arrow in one press.

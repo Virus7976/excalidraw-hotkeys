@@ -22,6 +22,7 @@ interface HotkeySettings {
 	fillColours: string[];
 	strokeColours: string[];
 	catchKeysFirst: boolean;
+	showStatusColours: boolean;
 	diagonalNudge: boolean;
 	nudgeStep: number;
 	nudgeStepShift: number;
@@ -43,6 +44,7 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 	fillColours: ["#ffc9c9", "#ffe8cc", "#fff3bf", "#d8f5a2", "#a5d8ff", "#d0bfff", "#fcc2d7", "#e9ecef"],
 	strokeColours: ["#c92a2a", "#e67700", "#f59f00", "#2b8a3e", "#1864ab", "#6741d9", "#a61e4d", "#495057"],
 	catchKeysFirst: true,
+	showStatusColours: true,
 	diagonalNudge: true,
 	nudgeStep: 12,
 	nudgeStepShift: 20,
@@ -108,6 +110,8 @@ interface AppState {
 	height: number;
 	editingTextElement?: El | null;
 	editingElement?: El | null;
+	currentItemStrokeColor?: string;
+	currentItemBackgroundColor?: string;
 }
 
 interface ExcalidrawAPI {
@@ -222,6 +226,7 @@ async function edit(c: Ctx, els: El[], fn: (el: El) => void) {
 }
 
 let colourNotice: Notice | null = null;
+let statusRefresh: (() => void) | null = null;
 
 /** A short popup with a colour square and its name. Replaces the last one. */
 function showColour(label: string, colour: string) {
@@ -244,9 +249,11 @@ function setPen(c: Ctx, typed: Partial<El>, pen: Record<string, string>, label: 
 			x.id === id ? { ...x, ...typed, version: (x.version ?? 1) + 1, versionNonce: newSeed() } : x,
 		);
 		api.updateScene({ elements, appState: pen, captureUpdate: "IMMEDIATELY" });
+		statusRefresh?.();
 		return;
 	}
 	api.updateScene({ appState: pen, captureUpdate: "NEVER" });
+	statusRefresh?.();
 }
 
 // Remove an Obsidian block reference ("... ^abc123") from the end of a text.
@@ -307,6 +314,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 	private justRan: string | null = null;
 	private zoomFrame = 0;
 	private zoomGoal: number | null = null;
+	private statusEl: HTMLElement | null = null;
+	private statusKey = "";
 
 	async onload() {
 		await this.loadSettings();
@@ -340,9 +349,44 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.registerDomEvent(window, "blur", () => this.pressed.clear());
 
 		this.addSettingTab(new HotkeySettingTab(this.app, this));
+
+		// The pen colours, at the bottom right, only while a drawing is open.
+		statusRefresh = () => this.updateStatus();
+		this.statusEl = this.addStatusBarItem();
+		this.statusEl.addClass("ekh-status");
+		this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.updateStatus()));
+		this.registerInterval(window.setInterval(() => this.updateStatus(), 400));
+		this.updateStatus();
+	}
+
+	/** Show the stroke and fill colour that the next drawn thing gets. */
+	updateStatus() {
+		const el = this.statusEl;
+		if (!el) return;
+		const view = this.app.workspace.getActiveViewOfType(ItemView);
+		const st =
+			this.settings.showStatusColours && view?.getViewType() === "excalidraw"
+				? window.ExcalidrawAutomate?.getAPI(view).getExcalidrawAPI?.()?.getAppState()
+				: null;
+		const stroke = st?.currentItemStrokeColor ?? "";
+		const fill = st?.currentItemBackgroundColor ?? "";
+		const key = st ? `${stroke}|${fill}` : "";
+		if (key === this.statusKey) return;
+		this.statusKey = key;
+		el.empty();
+		el.toggleClass("ekh-hidden", !st);
+		if (!st) return;
+		const swatch = (label: string, colour: string) => {
+			const s = el.createSpan({ cls: "ekh-swatch", attr: { "aria-label": `${label}: ${colour}`, "data-tooltip-position": "top" } });
+			if (!colour || colour === "transparent") s.addClass("is-none");
+			else s.setCssProps({ "--ekh-swatch": colour });
+		};
+		swatch("Stroke", stroke);
+		swatch("Fill", fill);
 	}
 
 	onunload() {
+		statusRefresh = null;
 		window.cancelAnimationFrame(this.zoomFrame);
 	}
 
@@ -1057,7 +1101,7 @@ class HotkeyListModal extends Modal {
 // ---------------------------------------------------------------------------
 
 type NumberKey = "nudgeStep" | "nudgeStepShift" | "resizePercent" | "duplicateGap" | "fitPadding" | "zoomMs";
-type ToggleKey = "catchKeysFirst" | "diagonalNudge" | "copyText" | "copyFill" | "zoomOnSelection";
+type ToggleKey = "catchKeysFirst" | "showStatusColours" | "diagonalNudge" | "copyText" | "copyFill" | "zoomOnSelection";
 
 function parseZoomPresets(v: string): number[] {
 	return v
@@ -1109,6 +1153,7 @@ class HotkeySettingTab extends PluginSettingTab {
 							});
 						},
 					},
+					toggle("Colours in the status bar", "Show the stroke and fill colour at the bottom right while a drawing is open.", "showStatusColours"),
 					toggle("Catch keys before Excalidraw", "Run these hotkeys before Excalidraw's own keys can use them.", "catchKeysFirst"),
 					{
 						name: "Hotkey note",
