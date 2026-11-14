@@ -68,3 +68,8 @@
 .ekh-swatch.is-none {
 	background: linear-gradient(to top right, transparent 45%, var(--text-error) 45%, var(--text-error) 55%, transparent 55%);
 }
+
+/* Excalidraw flips colours in dark mode. The preview shows what the drawing shows. */
+.theme-dark .ekh-preview {
+	filter: invert(93%) hue-rotate(180deg);
+}
