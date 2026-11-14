@@ -106,6 +106,8 @@ interface AppState {
 	scrollY: number;
 	width: number;
 	height: number;
+	editingTextElement?: El | null;
+	editingElement?: El | null;
 }
 
 interface ExcalidrawAPI {
@@ -161,6 +163,8 @@ interface Ctx {
 	ea: EA;
 	selected: El[];
 	all: El[];
+	/** The text being typed right now, if any. */
+	typing: El | null;
 }
 
 interface Action {
@@ -171,6 +175,8 @@ interface Action {
 	keys?: Hotkey[];
 	/** Return false to let the key fall through to Excalidraw. */
 	canRun: (c: Ctx) => boolean;
+	/** Also runs while a text is being typed. */
+	whileTyping?: boolean;
 	run: (c: Ctx) => Promise<void> | void;
 }
 
@@ -213,6 +219,22 @@ async function edit(c: Ctx, els: El[], fn: (el: El) => void) {
 	c.ea.copyViewElementsToEAforEditing(els);
 	for (const el of c.ea.getElements()) fn(el);
 	await c.ea.addElementsToView(false, true);
+}
+
+/** Colour the text being typed, and set the colour for the next thing drawn. */
+function setPen(c: Ctx, typed: Partial<El>, pen: Record<string, string>, label: string) {
+	const api = c.ea.getExcalidrawAPI?.();
+	if (!api) return;
+	if (c.typing) {
+		const id = c.typing.id;
+		const elements = api.getSceneElementsIncludingDeleted().map((x: El) =>
+			x.id === id ? { ...x, ...typed, version: (x.version ?? 1) + 1, versionNonce: newSeed() } : x,
+		);
+		api.updateScene({ elements, appState: pen, captureUpdate: "IMMEDIATELY" });
+		return;
+	}
+	api.updateScene({ appState: pen, captureUpdate: "NEVER" });
+	if (c.selected.length === 0) new Notice(label, 1500);
 }
 
 // Remove an Obsidian block reference ("... ^abc123") from the end of a text.
@@ -285,7 +307,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				checkCallback: (checking) => {
 					if (this.justRan === a.id) return true;
 					const c = this.context();
-					if (!c || !a.canRun(c)) return false;
+					if (!c || (c.typing && !a.whileTyping) || !a.canRun(c)) return false;
 					if (!checking) {
 						this.markRan(a.id);
 						void a.run(c);
@@ -329,20 +351,22 @@ export default class ExcalidrawHotkeys extends Plugin {
 		const view = this.app.workspace.getActiveViewOfType(ItemView);
 		if (!view || view.getViewType() !== "excalidraw") return null;
 
-		const active = activeDocument.activeElement as HTMLElement | null;
-		if (
-			active &&
-			(active.tagName === "TEXTAREA" ||
-				active.tagName === "INPUT" ||
-				active.isContentEditable ||
-				active.closest(".excalidraw-textEditorContainer"))
-		)
-			return null;
-
 		const EAglobal = window.ExcalidrawAutomate;
 		if (!EAglobal?.getAPI) return null;
+
+		const active = activeDocument.activeElement as HTMLElement | null;
+		if (active?.closest(".excalidraw-textEditorContainer") || active?.classList.contains("excalidraw-wysiwyg")) {
+			const ea = EAglobal.getAPI(view);
+			const st = ea.getExcalidrawAPI?.()?.getAppState();
+			const typing = st?.editingTextElement ?? st?.editingElement ?? null;
+			if (!typing || typing.type !== "text") return null;
+			return { ea, selected: [], all: ea.getViewElements() ?? [], typing };
+		}
+		if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable))
+			return null;
+
 		const ea = EAglobal.getAPI(view);
-		return { ea, selected: ea.getViewSelectedElements() ?? [], all: ea.getViewElements() ?? [] };
+		return { ea, selected: ea.getViewSelectedElements() ?? [], all: ea.getViewElements() ?? [], typing: null };
 	}
 
 	/** The keys set in Settings, Hotkeys. */
@@ -387,7 +411,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 			if (!this.hotkeysFor(a.id).some((h) => matches(h, e))) continue;
 			const c = this.context();
 			if (this.justRan === a.id) return;
-			if (!c || !a.canRun(c)) continue;
+			if (!c || (c.typing && !a.whileTyping) || !a.canRun(c)) continue;
 			e.preventDefault();
 			e.stopImmediatePropagation();
 			this.markRan(a.id);
@@ -491,11 +515,13 @@ export default class ExcalidrawHotkeys extends Plugin {
 				name: `Stroke colour ${n}`,
 				group: "Colour",
 				keys: [hk(["Alt", "Shift"], String(n))],
-				canRun: hasSelection,
-				run: (c) =>
-					edit(c, withBoundText(c), (el) => {
-						el.strokeColor = s().strokeColours[i];
-					}),
+				canRun: always,
+				whileTyping: true,
+				run: async (c) => {
+					const col = s().strokeColours[i];
+					setPen(c, { strokeColor: col }, { currentItemStrokeColor: col }, `Pen: stroke colour ${n}`);
+					if (!c.typing) await edit(c, withBoundText(c), (el) => (el.strokeColor = col));
+				},
 			});
 		}
 		for (let i = 0; i < 8; i++) {
@@ -505,12 +531,17 @@ export default class ExcalidrawHotkeys extends Plugin {
 				name: `Fill colour ${n}`,
 				group: "Colour",
 				keys: [hk(["Alt"], String(n))],
-				canRun: hasSelection,
-				run: (c) =>
-					edit(c, c.selected, (el) => {
+				canRun: always,
+				whileTyping: true,
+				run: async (c) => {
+					const fill = s().fillColours[i];
+					setPen(c, { strokeColor: s().strokeColours[i] }, { currentItemBackgroundColor: fill }, `Pen: fill colour ${n}`);
+					if (c.typing) return;
+					await edit(c, c.selected, (el) => {
 						if (el.type === "text") el.strokeColor = s().strokeColours[i];
-						else if (!LINEAR.includes(el.type)) el.backgroundColor = s().fillColours[i];
-					}),
+						else if (!LINEAR.includes(el.type)) el.backgroundColor = fill;
+					});
+				},
 			});
 		}
 
