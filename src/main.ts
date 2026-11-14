@@ -12,9 +12,11 @@ import {
 	Setting,
 	SettingDefinition,
 	SettingDefinitionItem,
+	SuggestModal,
 	TFile,
 	normalizePath,
 } from "obsidian";
+import { FILLER, match, rank, wordScore, words } from "./smart";
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -27,6 +29,10 @@ interface HotkeySettings {
 	showStatusColours: boolean;
 	showOneByOne: boolean;
 	shiftGoesBack: boolean;
+	welcomed: boolean;
+	whichKey: boolean;
+	whichKeyDelay: number;
+	presets: (Preset | null)[];
 	/** Plain letter per tool command id, used only inside a drawing. */
 	toolKeys: Record<string, string>;
 	diagonalNudge: boolean;
@@ -54,6 +60,10 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 	showStatusColours: true,
 	showOneByOne: false,
 	shiftGoesBack: true,
+	welcomed: false,
+	whichKey: true,
+	whichKeyDelay: 500,
+	presets: Array<Preset | null>(9).fill(null),
 	toolKeys: {
 		"tool-select": "V",
 		"tool-rectangle": "R",
@@ -66,6 +76,13 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 		"tool-eraser": "E",
 		"tool-frame": "F",
 		delete: "X",
+		"nav-up": "Shift+W",
+		"nav-left": "Shift+A",
+		"nav-down": "Shift+S",
+		"nav-right": "Shift+D",
+		"follow-arrow": "Shift+F",
+		"follow-arrow-back": "Shift+R",
+		leader: "Backquote",
 	},
 	diagonalNudge: true,
 	nudgeStep: 12,
@@ -122,6 +139,8 @@ interface El {
 	isDeleted?: boolean;
 	startArrowhead?: string | null;
 	endArrowhead?: string | null;
+	startBinding?: { elementId: string } | null;
+	endBinding?: { elementId: string } | null;
 }
 
 interface AppState {
@@ -209,6 +228,60 @@ interface Action {
 	/** The "back" half of a cycle. Hidden when Shift goes back is off. */
 	back?: boolean;
 	run: (c: Ctx) => Promise<void> | void;
+}
+
+/** A set of style values. Values left out stay as they are. */
+interface Style {
+	stroke?: string;
+	fill?: string;
+	fillStyle?: string;
+	strokeWidth?: number;
+	strokeStyle?: string;
+	opacity?: number;
+	fontFamily?: number;
+	fontSize?: number;
+	textAlign?: string;
+	startArrowhead?: string | null;
+	endArrowhead?: string | null;
+}
+
+interface Preset {
+	name: string;
+	style: Style;
+	/** True while the name is made from the style; a name the user typed stays. */
+	auto?: boolean;
+}
+
+/** Where each style value lives on the pen, in Excalidraw's app state. */
+const PEN_KEYS: Record<keyof Style, string> = {
+	stroke: "currentItemStrokeColor",
+	fill: "currentItemBackgroundColor",
+	fillStyle: "currentItemFillStyle",
+	strokeWidth: "currentItemStrokeWidth",
+	strokeStyle: "currentItemStrokeStyle",
+	opacity: "currentItemOpacity",
+	fontFamily: "currentItemFontFamily",
+	fontSize: "currentItemFontSize",
+	textAlign: "currentItemTextAlign",
+	startArrowhead: "currentItemStartArrowhead",
+	endArrowhead: "currentItemEndArrowhead",
+};
+
+/** One step of a key sequence: a menu of keys, or a thing to do. */
+interface LeaderNode {
+	label: string;
+	children?: Map<string, LeaderNode>;
+	run?: (c: Ctx) => unknown;
+}
+
+/** One thing the search can find: a style, several styles at once, or a command. */
+interface SearchItem {
+	label: string;
+	hint: string;
+	words: string[];
+	kind: string;
+	style?: Style;
+	run?: (c: Ctx) => unknown;
 }
 
 const SHAPES = ["rectangle", "ellipse", "diamond"];
@@ -318,6 +391,91 @@ function comboOf(e: KeyboardEvent): string {
 	return [...mods, key].join("+");
 }
 
+const COMBO_LABEL: Record<string, string> = {
+	Backquote: "`", Comma: ",", Period: ".", Slash: "/", Semicolon: ";", Quote: "'",
+	BracketLeft: "[", BracketRight: "]", Minus: "-", Equal: "=", Backslash: "\\",
+	ArrowUp: "↑", ArrowDown: "↓", ArrowLeft: "←", ArrowRight: "→",
+};
+
+/** A saved combo as people read it: "Backquote" shows as "`". */
+function comboLabel(combo: string): string {
+	return combo
+		.split("+")
+		.map((p) => COMBO_LABEL[p] ?? p)
+		.join("+");
+}
+
+const isModifierCode = (code: string) => /^(Shift|Control|Alt|Meta|OS)(Left|Right)?$/.test(code);
+
+/** The modifier names held, from the physical keys down right now. */
+/** The modifiers held during a key event. Read from the event, so a lost key-up can never leave one stuck. */
+function modsOf(e: KeyboardEvent): string[] {
+	const out: string[] = [];
+	if (e.ctrlKey) out.push("Ctrl");
+	if (e.altKey) out.push("Alt");
+	if (e.shiftKey) out.push("Shift");
+	if (e.metaKey) out.push("Meta");
+	return out;
+}
+
+/** A command name without the part in brackets, for the small key panels. */
+const shortName = (name: string) => name.replace(/\s*\([^)]*\)/g, "").replace(/^Tool: /, "");
+
+/** A plain name for any colour, from its hue. */
+function hueName(hex: string): string {
+	const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+	if (!m) return hex;
+	const n = parseInt(m[1], 16);
+	const [r, g, b] = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => v / 255);
+	const max = Math.max(r, g, b);
+	const min = Math.min(r, g, b);
+	const l = (max + min) / 2;
+	const sat = max === min ? 0 : (max - min) / (1 - Math.abs(2 * l - 1));
+	if (sat < 0.15 || max - min < 0.08) return l < 0.2 ? "Black" : l > 0.85 ? "White" : "Grey";
+	let h = 0;
+	if (max === r) h = ((g - b) / (max - min) + 6) % 6;
+	else if (max === g) h = (b - r) / (max - min) + 2;
+	else h = (r - g) / (max - min) + 4;
+	h *= 60;
+	const name = h < 15 ? "Red" : h < 33 ? "Orange" : h < 65 ? "Yellow" : h < 165 ? "Green" : h < 200 ? "Teal" : h < 255 ? "Blue" : h < 290 ? "Purple" : h < 340 ? "Pink" : "Red";
+	return name;
+}
+
+/** The name of colour slot i: its usual name, or a name from its hue once you change it. */
+function slotName(kind: "stroke" | "fill", i: number, colour: string): string {
+	const defaults = kind === "stroke" ? DEFAULT_SETTINGS.strokeColours : DEFAULT_SETTINGS.fillColours;
+	if ((defaults[i] ?? "").toLowerCase() === colour.toLowerCase()) return COLOUR_NAMES[i];
+	return hueName(colour);
+}
+
+function colourName(kind: "stroke" | "fill", list: string[], value: string | undefined): string {
+	if (value === undefined) return "";
+	if (value === "transparent") return "none";
+	const i = list.findIndex((c) => c.toLowerCase() === value.toLowerCase());
+	if (i < 0) return hueName(value).toLowerCase();
+	return slotName(kind, i, value).toLowerCase();
+}
+
+/** A style in a few words, like "blue pen, bold, dashed". */
+function describeStyle(s: Style, st: HotkeySettings): string {
+	const parts: string[] = [];
+	if (s.stroke !== undefined) parts.push(s.stroke === "transparent" ? "no line" : `${colourName("stroke", st.strokeColours, s.stroke)} pen`);
+	if (s.fill !== undefined) parts.push(s.fill === "transparent" ? "no fill" : `${colourName("fill", st.fillColours, s.fill)} fill`);
+	if (s.fillStyle !== undefined && s.fill !== "transparent") parts.push(s.fillStyle);
+	if (s.strokeWidth !== undefined) parts.push(LINE_WIDTHS.find((w) => w[2] === s.strokeWidth)?.[1].toLowerCase() ?? `width ${s.strokeWidth}`);
+	if (s.strokeStyle !== undefined && s.strokeStyle !== "solid") parts.push(s.strokeStyle);
+	if (s.opacity !== undefined && s.opacity !== 100) parts.push(`${s.opacity}% opacity`);
+	if (s.fontFamily !== undefined) parts.push(`${FONTS.find((f) => f[2] === s.fontFamily)?.[1].toLowerCase() ?? "other"} font`);
+	if (s.fontSize !== undefined) parts.push(`${FONT_SIZES.find((f) => f[1] === s.fontSize)?.[0] ?? s.fontSize} text`);
+	if (s.textAlign !== undefined && s.textAlign !== "left") parts.push(`align ${s.textAlign === "center" ? "centre" : s.textAlign}`);
+	if (s.startArrowhead !== undefined || s.endArrowhead !== undefined) {
+		const a = !!s.startArrowhead;
+		const b = !!s.endArrowhead;
+		parts.push(a && b ? "both arrowheads" : a ? "start arrowhead" : b ? "end arrowhead" : "no arrowheads");
+	}
+	return parts.join(", ") || "empty";
+}
+
 // Remove an Obsidian block reference ("... ^abc123") from the end of a text.
 const stripBlockRef = (s?: string) => (s ? s.replace(/\s*\^[\w-]+$/, "") : s);
 
@@ -392,8 +550,14 @@ export default class ExcalidrawHotkeys extends Plugin {
 		});
 
 		this.registerDomEvent(window, "keydown", (e) => this.onKeyDown(e), { capture: true });
-		this.registerDomEvent(window, "keyup", (e) => this.pressed.delete(e.code), { capture: true });
-		this.registerDomEvent(window, "blur", () => this.pressed.clear());
+		this.registerDomEvent(window, "keyup", (e) => this.onKeyUp(e), { capture: true });
+		this.registerDomEvent(window, "blur", () => {
+			this.pressed.clear();
+			this.stopWhichKey();
+			this.endLeader();
+		});
+		this.registerDomEvent(window, "mousedown", () => this.endLeader(), { capture: true });
+		this.app.workspace.onLayoutReady(() => this.welcome());
 
 		this.addSettingTab(new HotkeySettingTab(this.app, this));
 
@@ -469,6 +633,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 	onunload() {
 		statusRefresh = null;
 		stopRecording?.();
+		window.clearTimeout(this.whichTimer);
+		this.hidePanel();
 		window.cancelAnimationFrame(this.zoomFrame);
 	}
 
@@ -479,6 +645,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.settings.strokeColours = [...(saved.strokeColours ?? DEFAULT_SETTINGS.strokeColours)];
 		this.settings.zoomPresets = [...(saved.zoomPresets ?? DEFAULT_SETTINGS.zoomPresets)];
 		this.settings.toolKeys = { ...DEFAULT_SETTINGS.toolKeys, ...(saved.toolKeys ?? {}) };
+		this.settings.presets = Array.from({ length: 9 }, (_, i) => saved.presets?.[i] ?? null);
 	}
 
 	async saveSettings() {
@@ -531,7 +698,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				n++;
 				continue;
 			}
-			if (!a.keys || Array.isArray(hm.customKeys?.[full])) continue;
+			if (!a.keys || (hm.customKeys?.[full] ?? []).length > 0) continue;
 			hm.setHotkeys(full, a.keys);
 			n++;
 		}
@@ -547,6 +714,10 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 	private onKeyDown(e: KeyboardEvent) {
 		this.pressed.add(e.code);
+		if (this.leader) return this.onLeaderKey(e);
+		if (isModifierCode(e.code)) {
+			if (!e.repeat) this.armWhichKey(e);
+		} else this.stopWhichKey();
 
 		if (this.settings.diagonalNudge && this.tryDiagonalNudge(e)) return;
 		if (this.tryToolKey(e)) return;
@@ -571,6 +742,531 @@ export default class ExcalidrawHotkeys extends Plugin {
 			void a.run(c);
 			return;
 		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Style engine: one rule for every style key
+	// -----------------------------------------------------------------------
+
+	/** The text being typed, read fresh from the scene. */
+	private liveTyped(c: Ctx): El | null {
+		if (!c.typing) return null;
+		const id = c.typing.id;
+		return c.ea.getExcalidrawAPI?.()?.getSceneElementsIncludingDeleted().find((x: El) => x.id === id) ?? null;
+	}
+
+	/**
+	 * Something selected: change it. Nothing selected: change the pen.
+	 * Typing a text: change that text. False when nothing could change.
+	 */
+	async applyStyle(c: Ctx, s: Style, label: string): Promise<boolean> {
+		const api = c.ea.getExcalidrawAPI?.();
+		if (!api) return false;
+		const keys = Object.keys(s) as (keyof Style)[];
+		const fits = (el: El, k: keyof Style): boolean => {
+			const text = el.type === "text";
+			if (k === "stroke" || k === "opacity") return true;
+			if (k === "fill") return !text && !LINEAR.includes(el.type);
+			if (k === "fillStyle") return SHAPES.includes(el.type);
+			if (k === "strokeWidth" || k === "strokeStyle") return !text && el.type !== "image";
+			if (k === "fontFamily" || k === "fontSize" || k === "textAlign") return text;
+			return el.type === "arrow";
+		};
+		// A fill style on a shape with no fill would show nothing, so give it a fill too.
+		const autoFill = s.fillStyle !== undefined && s.fill === undefined;
+		const penFill = api.getAppState().currentItemBackgroundColor;
+		const fillColour = penFill && penFill !== "transparent" ? penFill : this.settings.fillColours[2];
+		const put = (el: El) => {
+			for (const k of keys) {
+				if (!fits(el, k)) continue;
+				if (k === "stroke") el.strokeColor = s.stroke as string;
+				else if (k === "fill") el.backgroundColor = s.fill as string;
+				else (el as unknown as Record<string, unknown>)[k] = s[k];
+			}
+			if (autoFill && SHAPES.includes(el.type) && el.backgroundColor === "transparent") el.backgroundColor = fillColour;
+		};
+
+		if (c.typing) {
+			const t = this.liveTyped(c);
+			if (!t || !keys.some((k) => fits(t, k))) return false;
+			await edit(c, [t], put);
+			this.say(label, s);
+			return true;
+		}
+		if (c.selected.length > 0) {
+			const els = withBoundText(c).filter((el) => keys.some((k) => fits(el, k)));
+			if (els.length === 0) {
+				showInfo("This does not change what is selected");
+				return false;
+			}
+			c.ea.copyViewElementsToEAforEditing(els);
+			for (const el of c.ea.getElements()) {
+				put(el);
+				if (el.type === "text") c.ea.refreshTextElementSize?.(el.id);
+			}
+			await c.ea.addElementsToView(false, true);
+			this.say(label, s);
+			return true;
+		}
+		const patch: Record<string, unknown> = {};
+		for (const k of keys) patch[PEN_KEYS[k]] = s[k];
+		if (autoFill && api.getAppState().currentItemBackgroundColor === "transparent") patch[PEN_KEYS.fill] = fillColour;
+		api.updateScene({ appState: patch, captureUpdate: "NEVER" });
+		statusRefresh?.();
+		this.say(`Pen: ${label}`, s);
+		return true;
+	}
+
+	private say(label: string, s: Style) {
+		const keys = Object.keys(s);
+		const colour = keys.length === 1 ? (s.stroke ?? s.fill) : undefined;
+		if (colour !== undefined) showColour(label, colour);
+		else showInfo(label);
+	}
+
+	/** The style of the selection (the shape and its text), or of the pen. */
+	currentStyle(c: Ctx): Style {
+		const s: Style = {};
+		if (c.selected.length > 0) {
+			const els = withBoundText(c);
+			const shape = els.find((e) => e.type !== "text");
+			const text = els.find((e) => e.type === "text");
+			const base = shape ?? text;
+			if (base) {
+				s.stroke = base.strokeColor;
+				s.opacity = base.opacity ?? 100;
+			}
+			if (shape) {
+				if (!LINEAR.includes(shape.type)) s.fill = shape.backgroundColor;
+				if (SHAPES.includes(shape.type)) s.fillStyle = shape.fillStyle;
+				s.strokeWidth = shape.strokeWidth;
+				s.strokeStyle = shape.strokeStyle;
+				if (shape.type === "arrow") {
+					s.startArrowhead = shape.startArrowhead ?? null;
+					s.endArrowhead = shape.endArrowhead ?? null;
+				}
+			}
+			if (text) {
+				s.fontFamily = text.fontFamily;
+				s.fontSize = text.fontSize;
+				s.textAlign = text.textAlign;
+			}
+		} else {
+			const st = c.ea.getExcalidrawAPI?.()?.getAppState() as unknown as Record<string, unknown> | undefined;
+			for (const k of Object.keys(PEN_KEYS) as (keyof Style)[]) {
+				const v = st?.[PEN_KEYS[k]];
+				if (v !== undefined) (s as Record<string, unknown>)[k] = v;
+			}
+		}
+		return Object.fromEntries(Object.entries(s).filter(([, v]) => v !== undefined));
+	}
+
+	async savePreset(c: Ctx, i: number) {
+		const style = this.currentStyle(c);
+		const old = this.settings.presets[i];
+		const keepName = old && !old.auto;
+		const name = keepName ? old.name : describeStyle(style, this.settings);
+		this.settings.presets[i] = { name, style, auto: !keepName };
+		await this.saveSettings();
+		showInfo(`Saved preset ${i + 1}: ${name}`);
+	}
+
+	async usePreset(c: Ctx, i: number) {
+		const p = this.settings.presets[i];
+		if (!p) {
+			showInfo(`Preset ${i + 1} is empty. Save one first.`);
+			return;
+		}
+		await this.applyStyle(c, p.style, p.name);
+	}
+
+	// -----------------------------------------------------------------------
+	// Key panel: the which-key helper and the leader menu share it
+	// -----------------------------------------------------------------------
+
+	private panelEl: HTMLElement | null = null;
+
+	private showPanel(title: string, rows: [string, string][], footer: string) {
+		this.hidePanel();
+		const doc = activeDocument;
+		const el = doc.body.createDiv({ cls: "ekh-panel" });
+		el.createDiv({ cls: "ekh-panel-title", text: title });
+		const grid = el.createDiv({ cls: "ekh-panel-grid" });
+		if (rows.length === 0) grid.createDiv({ cls: "ekh-none", text: "No keys here yet." });
+		for (const [key, label] of rows) {
+			const row = grid.createDiv({ cls: "ekh-panel-row" });
+			row.createEl("kbd", { text: key });
+			row.createSpan({ text: label });
+		}
+		if (footer) el.createDiv({ cls: "ekh-panel-footer", text: footer });
+		this.panelEl = el;
+	}
+
+	private hidePanel() {
+		this.panelEl?.remove();
+		this.panelEl = null;
+	}
+
+	// Which-key: hold modifiers for a moment to see every key that uses them.
+	private whichTimer = 0;
+	private whichMods = "";
+
+	private armWhichKey(e: KeyboardEvent) {
+		window.clearTimeout(this.whichTimer);
+		if (!this.settings.whichKey || this.leader) return;
+		const c = this.context();
+		if (!c || c.typing) return;
+		// The panel is up already: switch it to the new modifiers at once.
+		const wait = this.whichMods ? 0 : this.settings.whichKeyDelay;
+		// A key other than a modifier stops this timer, in onKeyDown.
+		const mods = modsOf(e);
+		this.whichTimer = window.setTimeout(() => {
+			if (mods.length > 0) this.showWhichKey(mods);
+		}, wait);
+	}
+
+	private stopWhichKey() {
+		window.clearTimeout(this.whichTimer);
+		if (this.whichMods && !this.leader) this.hidePanel();
+		this.whichMods = "";
+	}
+
+	/** Rows for one set of modifiers: the Obsidian hotkeys and the drawing keys that use exactly them. */
+	/** A command name for the panel. Colour keys say which colour: "Pen colour 3: Blue". */
+	private panelName(a: Action): string {
+		const m = /^(stroke|fill)-colour-(\d)$/.exec(a.id);
+		if (!m) return shortName(a.name);
+		const kind = m[1] as "stroke" | "fill";
+		const i = Number(m[2]) - 1;
+		const col = (kind === "stroke" ? this.settings.strokeColours : this.settings.fillColours)[i];
+		return col ? `${kind === "stroke" ? "Pen" : "Fill"} colour ${i + 1}: ${slotName(kind, i, col)}` : shortName(a.name);
+	}
+
+	keysWithMods(mods: string[]): [string, string][] {
+		const want = [...mods].sort().join("+");
+		const rows: [string, string][] = [];
+		const norm = (m: string) => (m === "Mod" ? (Platform.isMacOS ? "Meta" : "Ctrl") : m);
+		for (const a of this.visibleActions()) {
+			for (const h of this.hotkeysFor(a.id)) {
+				if ([...h.modifiers].map(norm).sort().join("+") !== want) continue;
+				rows.push([KEY_LABEL[h.key] ?? h.key.toUpperCase(), this.panelName(a)]);
+			}
+		}
+		for (const [id, combo] of Object.entries(this.settings.toolKeys)) {
+			if (!combo) continue;
+			const parts = combo.split("+");
+			const key = parts.pop() as string;
+			const m = parts.map((p) => (p === "Win" || p === "Cmd" ? "Meta" : p));
+			if ([...m].sort().join("+") !== want) continue;
+			const a = this.actions.find((x) => x.id === id);
+			if (a) rows.push([comboLabel(key), shortName(a.name)]);
+		}
+		return rows.sort((x, y) => x[0].localeCompare(y[0], undefined, { numeric: true }));
+	}
+
+	private showWhichKey(mods: string[]) {
+		const label = mods.map((m) => (m === "Meta" ? (Platform.isMacOS ? "Cmd" : "Win") : m === "Alt" && Platform.isMacOS ? "Option" : m)).join("+");
+		this.whichMods = label;
+		this.showPanel(`${label} +`, this.keysWithMods(mods), "Let go to hide.");
+	}
+
+	private onKeyUp(e: KeyboardEvent) {
+		this.pressed.delete(e.code);
+		if (!isModifierCode(e.code)) return;
+		const mods = modsOf(e);
+		if (mods.length === 0) this.stopWhichKey();
+		else if (this.whichMods) this.showWhichKey(mods);
+	}
+
+	// -----------------------------------------------------------------------
+	// Leader key: press it, then a short sequence of plain keys
+	// -----------------------------------------------------------------------
+
+	private leader: LeaderNode | null = null;
+	private leaderPath: string[] = [];
+
+	startLeader() {
+		const c = this.context();
+		if (!c || c.typing) return;
+		this.stopWhichKey();
+		this.leader = this.leaderTree();
+		this.leaderPath = [];
+		this.showLeader();
+	}
+
+	endLeader() {
+		if (!this.leader) return;
+		this.leader = null;
+		this.hidePanel();
+	}
+
+	private showLeader() {
+		const node = this.leader;
+		if (!node) return;
+		const rows: [string, string][] = [...(node.children ?? new Map<string, LeaderNode>())].map(([k, n]) => [
+			comboLabel(k),
+			n.children ? `${n.label}...` : n.label,
+		]);
+		const path = ["Leader", ...this.leaderPath].join(" › ");
+		const lead = comboLabel(this.settings.toolKeys.leader || "");
+		const footer = this.leaderPath.length === 0 && lead ? `${lead} again: search. Esc: cancel.` : "Esc: cancel.";
+		this.showPanel(path, rows, footer);
+	}
+
+	private onLeaderKey(e: KeyboardEvent) {
+		if (isModifierCode(e.code)) return;
+		e.preventDefault();
+		e.stopImmediatePropagation();
+		const node = this.leader;
+		if (!node) return;
+		const combo = comboOf(e);
+		if (e.key === "Escape") return this.endLeader();
+		if (this.leaderPath.length === 0 && combo.toUpperCase() === (this.settings.toolKeys.leader || "").toUpperCase()) {
+			this.endLeader();
+			this.openSearch();
+			return;
+		}
+		const next = [...(node.children ?? new Map<string, LeaderNode>())].find(([k]) => k.toUpperCase() === combo.toUpperCase())?.[1];
+		if (!next) {
+			this.endLeader();
+			showInfo(`No key ${comboLabel(combo)} here`);
+			return;
+		}
+		if (next.children) {
+			this.leader = next;
+			this.leaderPath.push(next.label);
+			this.showLeader();
+			return;
+		}
+		this.endLeader();
+		const c = this.context();
+		if (c && next.run) void next.run(c);
+	}
+
+	/** The menu behind the leader key. Letters are picked to be easy to remember. */
+	leaderTree(): LeaderNode {
+		const st = this.settings;
+		const menu = (label: string, entries: [string, LeaderNode][]): LeaderNode => ({ label, children: new Map(entries) });
+		const leaf = (label: string, run: (c: Ctx) => unknown): LeaderNode => ({ label, run });
+		const style = (label: string, s: Style) => leaf(label, (c) => this.applyStyle(c, s, label));
+		const digits = <T,>(list: T[], make: (t: T, i: number) => LeaderNode): [string, LeaderNode][] =>
+			list.map((t, i) => [String(i + 1), make(t, i)]);
+
+		return menu("Leader", [
+			["C", menu("Pen colour", [["0", style("No line", { stroke: "transparent" })], ...digits(st.strokeColours, (col, i) => style(slotName("stroke", i, col), { stroke: col }))])],
+			["F", menu("Fill colour", [["0", style("No fill", { fill: "transparent" })], ...digits(st.fillColours, (col, i) => style(slotName("fill", i, col), { fill: col }))])],
+			["W", menu("Line width", digits(LINE_WIDTHS, (w) => style(w[1], { strokeWidth: w[2] })))],
+			["S", menu("Line style", [["S", style("Solid", { strokeStyle: "solid" })], ["D", style("Dashed", { strokeStyle: "dashed" })], ["O", style("Dotted", { strokeStyle: "dotted" })]])],
+			["H", menu("Fill style", [["N", style("No fill", { fill: "transparent" })], ["H", style("Hachure", { fillStyle: "hachure" })], ["X", style("Cross-hatch", { fillStyle: "cross-hatch" })], ["S", style("Solid", { fillStyle: "solid" })]])],
+			["T", menu("Font", FONTS.map((f): [string, LeaderNode] => [f[0][0].toUpperCase(), style(f[1], { fontFamily: f[2] })]))],
+			["Z", menu("Font size", [["S", style("Small", { fontSize: 16 })], ["M", style("Medium", { fontSize: 20 })], ["L", style("Large", { fontSize: 28 })], ["X", style("Very large", { fontSize: 36 })]])],
+			["A", menu("Align", [["L", style("Left", { textAlign: "left" })], ["C", style("Centre", { textAlign: "center" })], ["R", style("Right", { textAlign: "right" })]])],
+			["E", menu("Arrowheads", [
+				["N", style("None", { startArrowhead: null, endArrowhead: null })],
+				["E", style("End", { startArrowhead: null, endArrowhead: "arrow" })],
+				["B", style("Both", { startArrowhead: "arrow", endArrowhead: "arrow" })],
+				["S", style("Start", { startArrowhead: "arrow", endArrowhead: null })],
+			])],
+			["O", menu("Opacity", [["0", style("100%", { opacity: 100 })], ...digits([1, 2, 3, 4, 5, 6, 7, 8, 9], (n) => style(`${n * 10}%`, { opacity: n * 10 }))])],
+			["P", menu("Pen presets", [
+				...digits(st.presets, (p, i) => leaf(p ? p.name : `Preset ${i + 1} (empty)`, (c) => this.usePreset(c, i))),
+				["S", menu("Save pen as preset", digits(st.presets, (p, i) => leaf(p ? `Replace: ${p.name}` : `Preset ${i + 1} (empty)`, (c) => this.savePreset(c, i))))],
+			])],
+			["V", menu("Zoom", digits(st.zoomPresets, (z, i) => leaf(`${z}%`, (c) => this.actions.find((a) => a.id === `zoom-preset-${i + 1}`)?.run(c))))],
+			["Slash", leaf("Search styles and commands", () => this.openSearch())],
+		]);
+	}
+
+	// -----------------------------------------------------------------------
+	// Move between shapes
+	// -----------------------------------------------------------------------
+
+	private centreOf(e: El) {
+		return { x: e.x + e.width / 2, y: e.y + e.height / 2 };
+	}
+
+	/** Shapes you can move to: not arrows or lines, and a box instead of its label. */
+	private stops(c: Ctx): El[] {
+		return c.all.filter((e) => !e.isDeleted && e.type !== "arrow" && e.type !== "line" && !(e.type === "text" && e.containerId));
+	}
+
+	private currentStop(c: Ctx): El | null {
+		const first = c.selected[0];
+		if (!first) return null;
+		if (first.type === "text" && first.containerId) return c.all.find((e) => e.id === first.containerId) ?? first;
+		return first;
+	}
+
+	private selectOnly(c: Ctx, el: El) {
+		const api = c.ea.getExcalidrawAPI?.();
+		if (!api) return;
+		api.updateScene({ appState: { selectedElementIds: { [el.id]: true } }, captureUpdate: "NEVER" });
+		// Scroll it into view when it is near or past the edge.
+		const st = api.getAppState();
+		const z = st.zoom.value;
+		const p = this.centreOf(el);
+		const sx = (p.x + st.scrollX) * z;
+		const sy = (p.y + st.scrollY) * z;
+		const m = 60;
+		if (sx < m || sy < m || sx > st.width - m || sy > st.height - m) {
+			api.updateScene({ appState: { scrollX: st.width / 2 / z - p.x, scrollY: st.height / 2 / z - p.y }, captureUpdate: "NEVER" });
+		}
+	}
+
+	/** Select the nearest shape in a direction. With nothing selected, the shape nearest the middle of the view. */
+	moveSelection(c: Ctx, dx: number, dy: number) {
+		const stops = this.stops(c);
+		const cur = this.currentStop(c);
+		if (!cur) {
+			const api = c.ea.getExcalidrawAPI?.();
+			const st = api?.getAppState();
+			if (!st || stops.length === 0) return showInfo("Nothing to select");
+			const mid = { x: st.width / 2 / st.zoom.value - st.scrollX, y: st.height / 2 / st.zoom.value - st.scrollY };
+			const near = stops.reduce((a, b) => (Math.hypot(this.centreOf(a).x - mid.x, this.centreOf(a).y - mid.y) <= Math.hypot(this.centreOf(b).x - mid.x, this.centreOf(b).y - mid.y) ? a : b));
+			return this.selectOnly(c, near);
+		}
+		const from = this.centreOf(cur);
+		let best: El | null = null;
+		let bestScore = Infinity;
+		for (const e of stops) {
+			if (e.id === cur.id) continue;
+			const p = this.centreOf(e);
+			const vx = p.x - from.x;
+			const vy = p.y - from.y;
+			const along = vx * dx + vy * dy;
+			if (along <= 1) continue;
+			const across = Math.abs(vx * dy - vy * dx);
+			if (across > along) continue;
+			const score = along + across * 2;
+			if (score < bestScore) {
+				bestScore = score;
+				best = e;
+			}
+		}
+		if (!best) return showInfo("No shape that way");
+		this.selectOnly(c, best);
+	}
+
+	/** Select the shape at the other end of an arrow from the selected shape. */
+	followArrow(c: Ctx, forward: boolean) {
+		const cur = this.currentStop(c);
+		if (!cur) return showInfo("Select something first");
+		const targets = c.all
+			.filter((a) => a.type === "arrow" && !a.isDeleted && (forward ? a.startBinding?.elementId : a.endBinding?.elementId) === cur.id)
+			.map((a) => (forward ? a.endBinding?.elementId : a.startBinding?.elementId))
+			.map((id) => c.all.find((e) => e.id === id && !e.isDeleted))
+			.filter((e): e is El => !!e);
+		if (targets.length === 0) return showInfo(forward ? "No arrow goes out of this shape" : "No arrow comes into this shape");
+		// More than one: take them in reading order, top to bottom, then left to right.
+		targets.sort((a, b) => a.y - b.y || a.x - b.x);
+		this.selectOnly(c, targets[0]);
+		if (targets.length > 1) showInfo(`${targets.length} arrows. Took the top one.`);
+	}
+
+	// -----------------------------------------------------------------------
+	// Search: styles and commands, with smart matching
+	// -----------------------------------------------------------------------
+
+	searchItems(): SearchItem[] {
+		const st = this.settings;
+		const items: SearchItem[] = [];
+		const style = (label: string, kind: string, s: Style, extra = "") =>
+			items.push({ label, hint: "", kind, style: s, words: words(`${label} ${extra}`) });
+		st.strokeColours.forEach((col, i) => style(`Pen colour ${i + 1}: ${slotName("stroke", i, col)}`, "pen", { stroke: col }, i === 0 ? "black ink default" : ""));
+		style("No line", "pen", { stroke: "transparent" }, "none invisible outline");
+		st.fillColours.forEach((col, i) => style(`Fill colour ${i + 1}: ${slotName("fill", i, col)}`, "fill", { fill: col }, i === 0 ? "black ink" : ""));
+		style("No fill", "fill", { fill: "transparent" }, "none empty hollow");
+		for (const [, name, w] of LINE_WIDTHS) style(`Line width: ${name}`, "width", { strokeWidth: w }, name === "Extra bold" ? "thickest heaviest" : "");
+		for (const ls of LINE_STYLES) style(`Line style: ${ls}`, "linestyle", { strokeStyle: ls });
+		for (const fs of ["hachure", "cross-hatch", "solid"]) style(`Fill style: ${fs}`, "fillstyle", { fillStyle: fs }, fs === "hachure" ? "hatch hatched lines" : fs === "cross-hatch" ? "crosshatch" : "full");
+		for (const [, name, fam] of FONTS) style(`Font: ${name}`, "font", { fontFamily: fam });
+		for (const [name, size] of FONT_SIZES) style(`Font size: ${name}`, "size", { fontSize: size }, "text");
+		for (const al of ["left", "center", "right"]) style(`Align: ${al === "center" ? "centre" : al}`, "align", { textAlign: al }, "text");
+		style("Arrowheads: none", "heads", { startArrowhead: null, endArrowhead: null }, "arrow");
+		style("Arrowheads: end", "heads", { startArrowhead: null, endArrowhead: "arrow" }, "arrow one");
+		style("Arrowheads: both", "heads", { startArrowhead: "arrow", endArrowhead: "arrow" }, "arrow two double");
+		style("Arrowheads: start", "heads", { startArrowhead: "arrow", endArrowhead: null }, "arrow back");
+		for (let n = 1; n <= 10; n++) style(`Opacity: ${n * 10}%`, "opacity", { opacity: n * 10 }, `${n * 10}`);
+		st.presets.forEach((p, i) => {
+			if (p) items.push({ label: `Preset ${i + 1}: ${p.name}`, hint: p.auto ? "" : describeStyle(p.style, st), kind: "preset", style: p.style, words: words(`preset ${i + 1} ${p.name} ${describeStyle(p.style, st)}`) });
+		});
+		for (const a of this.visibleActions()) {
+			const keys = [...(st.toolKeys[a.id] ? [comboLabel(st.toolKeys[a.id])] : []), ...this.hotkeysFor(a.id).map(hotkeyLabel)];
+			items.push({
+				label: a.name,
+				hint: keys.join(", "),
+				kind: "command",
+				run: (c) => (a.canRun(c) ? a.run(c) : showInfo(c.selected.length === 0 ? "Select something first" : "This does not change what is selected")),
+				words: words(`${a.name} ${a.group} command`),
+			});
+		}
+		return items;
+	}
+
+	/** Best matches first. Several style words at once ("blue dashed bold") give one combined result on top. */
+	searchSuggestions(query: string, items: SearchItem[]): SearchItem[] {
+		const ranked = rank(query, items, (t) => t.words, (t) => t.label).slice(0, 60);
+		const tokens = words(query);
+		const fillMode = tokens.includes("fill");
+		const meaningful = tokens.filter((t) => !FILLER.has(t) && t !== "fill");
+		const styles = items.filter((t) => t.style && t.kind !== "preset" && t.kind !== (fillMode ? "pen" : "fill"));
+		// Each word goes to the kind of style it fits best.
+		const byKind = new Map<string, string[]>();
+		for (const t of meaningful) {
+			let best = 0;
+			let kind = "";
+			for (const it of styles) {
+				const sc = Math.max(0, ...it.words.map((w) => wordScore(t, w)));
+				if (sc > best) {
+					best = sc;
+					kind = it.kind;
+				}
+			}
+			if (best < 1.5) return ranked;
+			byKind.set(kind, [...(byKind.get(kind) ?? []), t]);
+		}
+		if (byKind.size < 2) return ranked;
+		const parts: SearchItem[] = [];
+		for (const [kind, toks] of byKind) {
+			const pick = rank(toks.join(" "), styles.filter((s) => s.kind === kind), (t) => t.words, (t) => t.label)[0];
+			if (!pick || match(toks, pick.words).missed > 0) return ranked;
+			parts.push(pick);
+		}
+		const combo: SearchItem = {
+			label: parts.map((p) => p.label.replace(/^[^:]*: /, "")).join(" + "),
+			hint: "All at once",
+			kind: "combo",
+			style: Object.assign({}, ...parts.map((p) => p.style)) as Style,
+			words: [],
+		};
+		return [combo, ...ranked];
+	}
+
+	openSearch() {
+		const c = this.context();
+		if (!c || c.typing) return;
+		new StyleSearchModal(this.app, this, this.searchItems(), (it) => {
+			// Run after the search box closes and the drawing has focus again.
+			window.setTimeout(() => {
+				const now = this.context();
+				if (!now) return;
+				if (it.style) void this.applyStyle(now, it.style, it.label.replace(/^(Preset \d+|[^:]*): /, ""));
+				else void it.run?.(now);
+			}, 50);
+		}).open();
+	}
+
+	/** On first start, offer the suggested keys, unless this plugin's keys are already set. */
+	private welcome() {
+		if (this.settings.welcomed) return;
+		const hm = (this.app as AppInternals).hotkeyManager;
+		const hasKeys = this.actions.some((a) => (hm?.customKeys?.[`${this.manifest.id}:${a.id}`] ?? []).length > 0);
+		if (hasKeys) {
+			this.settings.welcomed = true;
+			void this.saveSettings();
+			return;
+		}
+		new WelcomeModal(this.app, this).open();
 	}
 
 	/** The tool command whose letter this key is, if any. */
@@ -1312,6 +2008,46 @@ export default class ExcalidrawHotkeys extends Plugin {
 			});
 		}
 
+
+		// Pen presets ---------------------------------------------------------------
+		for (let i = 0; i < 9; i++) {
+			const n = i + 1;
+			list.push({
+				id: `preset-${n}`,
+				name: `Use pen preset ${n}`,
+				group: "Presets",
+				keys: n <= 5 ? [hk(["Mod", "Shift"], String(n))] : undefined,
+				canRun: always,
+				whileTyping: true,
+				run: (c) => this.usePreset(c, i),
+			});
+			list.push({
+				id: `save-preset-${n}`,
+				name: `Save pen as preset ${n}`,
+				group: "Presets",
+				canRun: always,
+				run: (c) => this.savePreset(c, i),
+			});
+		}
+
+		// Move between shapes ------------------------------------------------------
+		// Their keys live in Settings, Drawing keys: Shift with a letter would block typing everywhere.
+		const moves: [string, string, number, number][] = [
+			["up", "Select the shape above", 0, -1],
+			["down", "Select the shape below", 0, 1],
+			["left", "Select the shape to the left", -1, 0],
+			["right", "Select the shape to the right", 1, 0],
+		];
+		for (const [id, name, dx, dy] of moves) {
+			list.push({ id: `nav-${id}`, name, group: "Move", canRun: always, run: (c) => this.moveSelection(c, dx, dy) });
+		}
+		list.push({ id: "follow-arrow", name: "Follow the arrow out of the selected shape", group: "Move", canRun: hasSelection, run: (c) => this.followArrow(c, true) });
+		list.push({ id: "follow-arrow-back", name: "Follow the arrow back into the selected shape", group: "Move", canRun: hasSelection, run: (c) => this.followArrow(c, false) });
+
+		// Leader key and search -----------------------------------------------------
+		list.push({ id: "leader", name: "Start a key sequence (leader key)", group: "Leader", canRun: always, run: () => this.startLeader() });
+		list.push({ id: "search", name: "Search styles and commands", group: "Leader", keys: [hk(["Alt"], "Z")], canRun: always, run: () => this.openSearch() });
+
 		return list;
 	}
 }
@@ -1341,7 +2077,7 @@ function hotkeyRows(plugin: ExcalidrawHotkeys) {
 	];
 	return all.map((r) => {
 		const letter = plugin.settings.toolKeys[r.id];
-		return { ...r, keys: [...(letter ? [letter] : []), ...plugin.hotkeysFor(r.id).map(hotkeyLabel)] };
+		return { ...r, keys: [...(letter ? [comboLabel(letter)] : []), ...plugin.hotkeysFor(r.id).map(hotkeyLabel)] };
 	});
 }
 
@@ -1383,7 +2119,7 @@ class HotkeyListModal extends Modal {
 		const rows = hotkeyRows(this.plugin);
 
 		const bar = contentEl.createDiv({ cls: "ekh-bar" });
-		const search = bar.createEl("input", { type: "search", placeholder: "Filter" });
+		const search = bar.createEl("input", { type: "search", placeholder: "Search, like: thicker line" });
 		const changeBtn = bar.createEl("button", { text: "Change keys" });
 		const saveBtn = bar.createEl("button", { text: "Save as note", cls: "mod-cta" });
 
@@ -1393,8 +2129,7 @@ class HotkeyListModal extends Modal {
 			body.empty();
 			let group = "";
 			for (const r of rows) {
-				const hay = `${r.name} ${r.keys.join(" ")} ${r.group}`.toLowerCase();
-				if (q && !q.split(/\s+/).every((w) => hay.includes(w))) continue;
+				if (q && match(words(q), words(`${r.name} ${r.keys.join(" ")} ${r.group}`)).missed > 0) continue;
 				if (r.group !== group) {
 					group = r.group;
 					body.createEl("tr").createEl("th", { text: group, attr: { colspan: "2" } });
@@ -1434,8 +2169,8 @@ class HotkeyListModal extends Modal {
 // Settings tab
 // ---------------------------------------------------------------------------
 
-type NumberKey = "nudgeStep" | "nudgeStepShift" | "resizePercent" | "duplicateGap" | "fitPadding" | "zoomMs";
-type ToggleKey = "catchKeysFirst" | "showStatusColours" | "showOneByOne" | "shiftGoesBack" | "diagonalNudge" | "copyText" | "copyFill" | "zoomOnSelection";
+type NumberKey = "whichKeyDelay" | "nudgeStep" | "nudgeStepShift" | "resizePercent" | "duplicateGap" | "fitPadding" | "zoomMs";
+type ToggleKey = "whichKey" | "catchKeysFirst" | "showStatusColours" | "showOneByOne" | "shiftGoesBack" | "diagonalNudge" | "copyText" | "copyFill" | "zoomOnSelection";
 
 function parseZoomPresets(v: string): number[] {
 	return v
@@ -1507,6 +2242,8 @@ class HotkeySettingTab extends PluginSettingTab {
 											void this.plugin.applySuggestedKeys(true).then((n) => new Notice(`Reset ${n} keys`));
 										},
 									},
+									toggle("Show keys while you hold a modifier", "Hold Alt, Ctrl or Shift for a moment in a drawing to see what each key does.", "whichKey"),
+									slider("Wait before showing keys", "Milliseconds to hold before the panel shows.", "whichKeyDelay", 100, 1500, 50),
 									toggle("Shift goes back", "Alt+Shift with a cycle key goes back one step, for line style, line width, fill style, font, align and arrowheads. Turn off to free those keys.", "shiftGoesBack"),
 									toggle("Show one-by-one commands", "Also list a command for each line style, line width, font, font size, align and arrowhead.", "showOneByOne"),
 									toggle("Catch keys before Excalidraw", "Run these hotkeys before Excalidraw's own keys can use them.", "catchKeysFirst"),
@@ -1521,19 +2258,19 @@ class HotkeySettingTab extends PluginSettingTab {
 					},
 					{
 						type: "page",
-						name: "Tool keys",
-						desc: "A key for each tool. Click a key, then press any key or combo. They work only in a drawing, never while you type.",
+						name: "Drawing keys",
+						desc: "Keys that work only in a drawing: tools, moving between shapes and the leader key. Click a key, then press any key or combo.",
 						displayValue: () =>
-							Object.entries(this.plugin.settings.toolKeys)
-								.filter(([, v]) => v)
-								.map(([, v]) => v)
+							Object.values(this.plugin.settings.toolKeys)
+								.filter(Boolean)
+								.map(comboLabel)
 								.join(", "),
 						items: [
 							{
 								type: "group",
 								items: [
 									{
-										name: "Reset tool keys",
+										name: "Reset drawing keys",
 										desc: "Put back the suggested keys.",
 										action: () => {
 											this.plugin.settings.toolKeys = { ...DEFAULT_SETTINGS.toolKeys };
@@ -1542,19 +2279,80 @@ class HotkeySettingTab extends PluginSettingTab {
 									},
 								],
 							},
+							...([
+								["Tools", "Tools"],
+								["Move between shapes", "Move"],
+								["Leader key", "Leader"],
+							] as const).map(
+								([heading, group]): SettingDefinitionItem => ({
+									type: "group",
+									heading,
+									items: this.plugin.actions
+										.filter((a) => a.group === group && a.id !== "search")
+										.map(
+											(a): SettingDefinition => ({
+												name: a.name.replace(/^Tool: /, ""),
+												desc:
+													a.id === "delete"
+														? "Only with something selected."
+														: a.id === "leader"
+															? "Press it, then a short row of keys. A panel shows the choices."
+															: "",
+												aliases: ["tool", "letter", "key", "drawing"],
+												render: (setting) => this.renderToolKey(setting, a),
+											}),
+										),
+								}),
+							),
+						],
+					},
+					{
+						type: "page",
+						name: "Pen presets",
+						desc: "Saved pens: colour, fill, line, font and more in one key.",
+						displayValue: () => `${this.plugin.settings.presets.filter(Boolean).length} saved`,
+						items: [
 							{
 								type: "group",
-								heading: "Keys",
-								items: this.plugin.actions
-									.filter((a) => a.group === "Tools")
-									.map(
-										(a): SettingDefinition => ({
-											name: a.name.replace(/^Tool: /, ""),
-											desc: a.id === "delete" ? "Only with something selected." : "",
-											aliases: ["tool", "letter", "key"],
-											render: (setting) => this.renderToolKey(setting, a),
-										}),
-									),
+								items: [
+									{
+										name: "Save a preset",
+										desc: "In a drawing, run Save pen as preset 1 to 9, or press the leader key, then P, S and a number. It saves the selected shape's style, or your pen.",
+									},
+								],
+							},
+							{
+								type: "group",
+								heading: "Presets",
+								items: this.plugin.settings.presets.map(
+									(p, i): SettingDefinition => ({
+										name: `Preset ${i + 1}`,
+										desc: p ? describeStyle(p.style, this.plugin.settings) : "Empty",
+										aliases: ["preset", "brush", "saved pen"],
+										render: (setting) => {
+											if (!p) return;
+											setting.addText((t) =>
+												t
+													.setPlaceholder("Name")
+													.setValue(p.name)
+													.onChange((v) => {
+														p.name = v.trim() || describeStyle(p.style, this.plugin.settings);
+														p.auto = !v.trim();
+														void this.plugin.saveSettings();
+													}),
+											);
+											setting.addExtraButton((b) =>
+												b
+													.setIcon("x")
+													.setTooltip("Delete preset")
+													.onClick(() => {
+														this.plugin.settings.presets[i] = null;
+														void this.plugin.saveSettings().then(() => this.update());
+													}),
+											);
+										},
+									}),
+								),
 							},
 						],
 					},
@@ -1641,7 +2439,7 @@ class HotkeySettingTab extends PluginSettingTab {
 		const keys = this.plugin.settings.toolKeys;
 		let show = () => {};
 		setting.addButton((b) => {
-			show = () => b.setButtonText(keys[a.id] || "None");
+			show = () => b.setButtonText(keys[a.id] ? comboLabel(keys[a.id]) : "None");
 			show();
 			b.onClick(() => {
 				// Only one button waits for a key at a time.
@@ -1669,7 +2467,7 @@ class HotkeySettingTab extends PluginSettingTab {
 					if (!combo) return;
 					const other = this.plugin.actions.find((x) => x.id !== a.id && keys[x.id]?.toUpperCase() === combo.toUpperCase());
 					if (other) {
-						new Notice(`${combo} is already used by ${other.name.replace(/^Tool: /, "")}`);
+						new Notice(`${comboLabel(combo)} is already used by ${shortName(other.name)}`);
 						return finish();
 					}
 					keys[a.id] = combo;
@@ -1710,8 +2508,8 @@ class HotkeySettingTab extends PluginSettingTab {
 			heading,
 			items: [
 				...COLOUR_NAMES.map(
-					(colour, i): SettingDefinition => ({
-						name: `${i + 1}. ${colour}`,
+					(_, i): SettingDefinition => ({
+						name: `${i + 1}. ${slotName(kind, i, list()[i])}`,
 						desc: this.plugin.hotkeysFor(id(i)).map(hotkeyLabel).join(", ") || "No key",
 						aliases: ["colour", "color", kind, kind === "stroke" ? "pen" : "fill"],
 						render: (setting) => {
@@ -1766,5 +2564,74 @@ class HotkeySettingTab extends PluginSettingTab {
 		}
 		await this.plugin.saveSettings();
 		if (key === "showOneByOne" || key === "shiftGoesBack") this.plugin.registerCommands();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// First start
+// ---------------------------------------------------------------------------
+
+class WelcomeModal extends Modal {
+	constructor(app: App, private plugin: ExcalidrawHotkeys) {
+		super(app);
+	}
+
+	onOpen() {
+		this.titleEl.setText("Excalidraw Hotkeys");
+		const { contentEl } = this;
+		contentEl.createEl("p", { text: "Use the suggested keys? They sit under the left hand, so the other hand stays on the mouse or pen." });
+		contentEl.createEl("p", { text: "You can change any key later in Settings, Hotkeys." });
+		const bar = contentEl.createDiv({ cls: "modal-button-container" });
+		const yes = bar.createEl("button", { text: "Use suggested keys", cls: "mod-cta" });
+		const no = bar.createEl("button", { text: "Not now" });
+		yes.addEventListener("click", () => {
+			void this.plugin.applySuggestedKeys().then((n) => new Notice(`Set ${n} keys`));
+			this.close();
+		});
+		no.addEventListener("click", () => this.close());
+	}
+
+	onClose() {
+		this.contentEl.empty();
+		this.plugin.settings.welcomed = true;
+		void this.plugin.saveSettings();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+class StyleSearchModal extends SuggestModal<SearchItem> {
+	constructor(
+		app: App,
+		private plugin: ExcalidrawHotkeys,
+		private items: SearchItem[],
+		private pick: (it: SearchItem) => void,
+	) {
+		super(app);
+		this.setPlaceholder("Search styles and commands, like: blue dashed thick");
+		this.limit = 60;
+	}
+
+	getSuggestions(query: string): SearchItem[] {
+		return this.plugin.searchSuggestions(query, this.items);
+	}
+
+	renderSuggestion(it: SearchItem, el: HTMLElement) {
+		el.addClass("ekh-suggestion");
+		const main = el.createDiv({ cls: "ekh-suggestion-main" });
+		if (it.style?.stroke !== undefined || it.style?.fill !== undefined) {
+			const colour = it.style.stroke ?? it.style.fill ?? "";
+			const sw = main.createSpan({ cls: "ekh-swatch" });
+			if (colour === "transparent") sw.addClass("is-none");
+			else sw.setCssProps({ "--ekh-swatch": colour });
+		}
+		main.createSpan({ text: it.label });
+		if (it.hint) el.createDiv({ cls: "ekh-suggestion-hint", text: it.hint });
+	}
+
+	onChooseSuggestion(it: SearchItem) {
+		this.pick(it);
 	}
 }

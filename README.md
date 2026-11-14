@@ -1,6 +1,6 @@
 # Excalidraw Hotkeys
 
-Keyboard control for [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) drawings in Obsidian. Colour, fill, line style, fonts, resize, duplicate with an arrow, and smooth zoom presets.
+Keyboard control for [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) drawings in Obsidian. Colour, fill, line style, fonts, resize, duplicate with an arrow, smooth zoom, pen presets, a leader key, moving between shapes with keys, and a smart search.
 
 ![Demo](docs/demo.gif)
 
@@ -9,10 +9,12 @@ Every action is an Obsidian command. You choose the keys in **Settings → Hotke
 ## Start
 
 1. Install and turn on the plugin. It needs the Excalidraw plugin.
-2. Open **Settings → Excalidraw Hotkeys**.
-3. Press **Use suggested keys**. This gives every command without a key the key in the table below. Keys you already set stay as they are. **Reset all keys to suggested** replaces them all.
+2. On first start, a popup asks if you want the suggested keys. Press **Use suggested keys**.
+3. Or later: open **Settings → Excalidraw Hotkeys → Keys** and press **Use suggested keys**. This gives every command without a key the key in the table below. Keys you already set stay as they are. **Reset all keys to suggested** replaces them all.
 
-Run **Show my hotkeys** at any time to see your keys. Press **Save as note** in that window to write the list to a note.
+Hold Alt, Ctrl or Shift for a moment in a drawing. A panel shows what each key does with it. Let go to hide it.
+
+Run **Show my hotkeys** at any time to see your keys. Its search understands what you mean, like `thicker line`. Press **Save as note** in that window to write the list to a note.
 
 ## Commands
 
@@ -49,14 +51,22 @@ The suggested keys are all under the left hand, so the right hand stays on the m
 | **Zoom** | |
 | Zoom preset 1–9 | `Ctrl+Alt+1` … `Ctrl+Alt+5` |
 | Zoom in / out to the next preset | `Ctrl+Alt+Z` / `Ctrl+Alt+Shift+Z` |
-| **Tools** (set in Settings → Tool keys) | |
+| **Pen presets** | |
+| Use pen preset 1–9 | `Ctrl+Shift+1` … `Ctrl+Shift+5` |
+| Save pen as preset 1–9 | none (or the leader key, then P, S and a number) |
+| **Search** | |
+| Search styles and commands | `Alt+Z` |
+| **Drawing keys** (set in Settings → Drawing keys) | |
 | Select / Rectangle / Diamond / Arrow / Text / Eraser / Frame | `V` / `R` / `D` / `A` / `T` / `E` / `F` |
 | Ellipse (C for circle) / Line (S for straight) / Pen (W for write) | `C` / `S` / `W` |
 | Delete the selection | `X` |
+| Select the shape above / left / below / right | `Shift+W` / `A` / `S` / `D` |
+| Follow the arrow out of / back into the selected shape | `Shift+F` / `Shift+R` |
+| Leader key | `` ` `` (the key left of 1) |
 | **Other** | |
 | Show my hotkeys | none |
 
-Tool keys work only inside a drawing, and never while you type. To change one, open Settings → Tool keys, click its key, then press any key or combo, like `W` or `Alt+P`. They are not in Obsidian's Hotkeys list, because a plain letter there would stop that letter from typing in every note. Each tool is also a command, so you can give it a Ctrl or Alt key in Settings → Hotkeys.
+Drawing keys work only inside a drawing, and never while you type. To change one, open Settings → Drawing keys, click its key, then press any key or combo, like `W` or `Alt+P`. They are not in Obsidian's Hotkeys list, because a plain letter there would stop that letter from typing in every note. Each tool is also a command, so you can give it a Ctrl or Alt key in Settings → Hotkeys.
 
 A command for each single line style, line width, font, font size, align and arrowhead is hidden. Turn on **Show one-by-one commands** to list them too.
 
@@ -70,15 +80,41 @@ Colour and style keys work on what you are using:
 
 Pen keys change lines, arrows and text. Fill keys change only the inside of boxes, circles and diamonds. Each colour key shows a short popup with the colour. The status bar at the bottom right shows your pen and fill colour while a drawing is open.
 
+### Pen presets
+
+A preset is a saved pen: colour, fill, fill style, line width, line style, font, size, align, arrowheads and opacity. **Save pen as preset N** saves the selected shape's style, or your pen if nothing is selected. **Use pen preset N** works like every other key: on the selection, on your pen, or on the text you type. Rename or delete presets in Settings → Pen presets.
+
+### Leader key
+
+Press the leader key (`` ` ``), then a short row of plain keys. A panel shows the choices at each step. Examples:
+
+- `` ` C 3 ``: pen colour 3. `` ` F 0 ``: no fill.
+- `` ` W 2 ``: bold line. `` ` S D ``: dashed. `` ` H X ``: cross-hatch fill.
+- `` ` P 1 ``: use preset 1. `` ` P S 1 ``: save preset 1.
+- `` ` V 3 ``: zoom preset 3. `` ` ` `` or `` ` / ``: search.
+
+Escape or a click cancels.
+
+### Move between shapes
+
+`Shift+W/A/S/D` selects the nearest shape above, left, below or right. With nothing selected, it selects the shape nearest the middle of the screen. `Shift+F` follows an arrow out of the selected shape. `Shift+R` follows it back.
+
+### Search
+
+`Alt+Z` opens a search for styles and commands. It knows other words (circle, thicker, copy, see-through) and small typos. Type several styles at once, like `blu dashd thik`. The top result then sets all of them in one step.
+
+### Diagonal move
+
 Hold two arrow keys to move the selection on a diagonal. Hold Shift too for a bigger step. This one is not in the Hotkeys menu.
 
 ## Settings
 
-The first page has 6 parts:
+The first page has 7 parts:
 
-- **Keys**: use or reset the suggested keys, Shift goes back, show one-by-one commands, catch keys before Excalidraw, and where the hotkey note goes.
-- **Tool keys**: a key for each tool. Click a key and press any key or combo. The × button removes it.
-- **Colours**: the 8 pen colours and 8 fill colours, and the status bar colours. Colour 1 is Excalidraw's own ink: white in dark mode, black in light mode. The square next to each colour shows how it looks in the drawing.
+- **Keys**: use or reset the suggested keys, the key panel and its wait time, Shift goes back, show one-by-one commands, catch keys before Excalidraw, and where the hotkey note goes.
+- **Drawing keys**: a key for each tool, for moving between shapes, and the leader key. Click a key and press any key or combo. The × button removes it.
+- **Pen presets**: rename or delete your presets.
+- **Colours**: the 8 pen colours and 8 fill colours, and the status bar colours. Colour 1 is Excalidraw's own ink: white in dark mode, black in light mode. If you change a colour, its name follows the new colour. The square next to each colour shows how it looks in the drawing.
 - **Zoom**: the presets, for example `25, 50, 100, 200, 400`, the zoom speed, and zoom on the selection.
 - **Duplicate**: what a copy keeps, and the gap to it.
 - **Moving and sizing**: diagonal move, resize step and fit padding.
