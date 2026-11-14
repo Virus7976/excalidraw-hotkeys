@@ -23,6 +23,8 @@ interface HotkeySettings {
 	strokeColours: string[];
 	catchKeysFirst: boolean;
 	showStatusColours: boolean;
+	showOneByOne: boolean;
+	shiftGoesBack: boolean;
 	diagonalNudge: boolean;
 	nudgeStep: number;
 	nudgeStepShift: number;
@@ -46,6 +48,8 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 	strokeColours: ["#1e1e1e", "#e03131", "#1971c2", "#2f9e44", "#f08c00", "#e8590c", "#9c36b5", "#868e96"],
 	catchKeysFirst: true,
 	showStatusColours: true,
+	showOneByOne: false,
+	shiftGoesBack: true,
 	diagonalNudge: true,
 	nudgeStep: 12,
 	nudgeStepShift: 20,
@@ -182,6 +186,10 @@ interface Action {
 	canRun: (c: Ctx) => boolean;
 	/** Also runs while a text is being typed. */
 	whileTyping?: boolean;
+	/** A one-by-one command that a cycle command also covers. Hidden unless turned on. */
+	oneByOne?: boolean;
+	/** The "back" half of a cycle. Hidden when Shift goes back is off. */
+	back?: boolean;
 	run: (c: Ctx) => Promise<void> | void;
 }
 
@@ -326,22 +334,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		await this.loadSettings();
 		this.actions = this.buildActions();
 
-		for (const a of this.actions) {
-			this.addCommand({
-				id: a.id,
-				name: a.name,
-				checkCallback: (checking) => {
-					if (this.justRan === a.id) return true;
-					const c = this.context();
-					if (!c || (c.typing && !a.whileTyping) || !a.canRun(c)) return false;
-					if (!checking) {
-						this.markRan(a.id);
-						void a.run(c);
-					}
-					return true;
-				},
-			});
-		}
+		this.registerCommands();
 
 		this.addCommand({
 			id: "show-hotkeys",
@@ -362,6 +355,40 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.updateStatus()));
 		this.registerInterval(window.setInterval(() => this.updateStatus(), 400));
 		this.updateStatus();
+	}
+
+	private registered = new Set<string>();
+
+	/** Add every command, and add or remove the one-by-one ones to match the setting. */
+	registerCommands() {
+		for (const a of this.actions) {
+			const want = (!a.oneByOne || this.settings.showOneByOne) && (!a.back || this.settings.shiftGoesBack);
+			if (want && !this.registered.has(a.id)) {
+				this.addCommand({
+					id: a.id,
+					name: a.name,
+					checkCallback: (checking) => {
+						if (this.justRan === a.id) return true;
+						const c = this.context();
+						if (!c || (c.typing && !a.whileTyping) || !a.canRun(c)) return false;
+						if (!checking) {
+							this.markRan(a.id);
+							void a.run(c);
+						}
+						return true;
+					},
+				});
+				this.registered.add(a.id);
+			} else if (!want && this.registered.has(a.id)) {
+				this.removeCommand(a.id);
+				this.registered.delete(a.id);
+			}
+		}
+	}
+
+	/** The commands the user can see. */
+	visibleActions(): Action[] {
+		return this.actions.filter((a) => this.registered.has(a.id));
 	}
 
 	/** Show the stroke and fill colour that the next drawn thing gets. */
@@ -473,7 +500,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		if (this.settings.diagonalNudge && this.tryDiagonalNudge(e)) return;
 		if (!this.settings.catchKeysFirst) return;
 
-		for (const a of this.actions) {
+		for (const a of this.visibleActions()) {
 			if (!this.hotkeysFor(a.id).some((h) => matches(h, e))) continue;
 			const c = this.context();
 			if (this.justRan === a.id) return;
@@ -572,6 +599,19 @@ export default class ExcalidrawHotkeys extends Plugin {
 		const hasSelection = (c: Ctx) => c.selected.length > 0;
 		const always = () => true;
 		const list: Action[] = [];
+		// A cycle gets two commands: Alt+key goes forward, Alt+Shift+key goes back.
+		const wrap = (i: number, n: number) => ((i % n) + n) % n;
+		const cycle = (
+			id: string,
+			name: string,
+			group: string,
+			key: string,
+			canRun: (c: Ctx) => boolean,
+			step: (c: Ctx, dir: 1 | -1) => Promise<void> | void,
+		) => {
+			list.push({ id, name, group, keys: [hk(["Alt"], key)], canRun, run: (c) => step(c, 1) });
+			list.push({ id: `${id}-back`, name: `${name}, back`, group, keys: [hk(["Alt", "Shift"], key)], back: true, canRun, run: (c) => step(c, -1) });
+		};
 
 		// Colour ----------------------------------------------------------------
 		for (let i = 0; i < 8; i++) {
@@ -611,26 +651,30 @@ export default class ExcalidrawHotkeys extends Plugin {
 			});
 		}
 
-		list.push({
-			id: "cycle-fill-style",
-			name: "Cycle fill style",
-			group: "Colour",
-			keys: [hk(["Alt"], "F")],
-			canRun: (c) => c.selected.some((el) => SHAPES.includes(el.type)),
-			run: (c) =>
-				edit(c, c.selected, (el) => {
+		const FILLS = ["none", "hachure", "cross-hatch", "solid"];
+		cycle(
+			"cycle-fill-style",
+			"Cycle fill style (none, hachure, cross-hatch, solid)",
+			"Colour",
+			"F",
+			(c) => c.selected.some((el) => SHAPES.includes(el.type)),
+			(c, dir) => {
+				const first = c.selected.find((el) => SHAPES.includes(el.type));
+				const now = !first || first.backgroundColor === "transparent" ? "none" : (first.fillStyle ?? "hachure");
+				const next = FILLS[wrap(FILLS.indexOf(now) + dir, FILLS.length)];
+				const pen = c.ea.getExcalidrawAPI?.()?.getAppState().currentItemBackgroundColor;
+				const colour = pen && pen !== "transparent" ? pen : s().fillColours[2];
+				return edit(c, c.selected, (el) => {
 					if (!SHAPES.includes(el.type)) return;
-					if (el.backgroundColor === "transparent") {
-						el.backgroundColor = s().fillColours[2];
-						el.fillStyle = "hachure";
-					} else if (el.fillStyle === "hachure") el.fillStyle = "cross-hatch";
-					else if (el.fillStyle === "cross-hatch") el.fillStyle = "solid";
-					else {
+					if (next === "none") {
 						el.backgroundColor = "transparent";
-						el.fillStyle = "hachure";
+						return;
 					}
-				}),
-		});
+					if (el.backgroundColor === "transparent") el.backgroundColor = colour;
+					el.fillStyle = next;
+				});
+			},
+		);
 
 		list.push({
 			id: "reset-colours",
@@ -672,21 +716,15 @@ export default class ExcalidrawHotkeys extends Plugin {
 				id: `line-style-${style}`,
 				name: `Line style ${style}`,
 				group: "Lines",
+				oneByOne: true,
 				canRun: (c) => lineTargets(c).length > 0,
 				run: (c) => edit(c, lineTargets(c), (el) => (el.strokeStyle = style)),
 			});
 		}
-		list.push({
-			id: "cycle-line-style",
-			name: "Cycle line style",
-			group: "Lines",
-			keys: [hk(["Alt"], "D")],
-			canRun: (c) => lineTargets(c).length > 0,
-			run: (c) => {
-				const els = lineTargets(c);
-				const next = LINE_STYLES[(LINE_STYLES.indexOf(els[0].strokeStyle ?? "solid") + 1) % LINE_STYLES.length];
-				return edit(c, els, (el) => (el.strokeStyle = next));
-			},
+		cycle("cycle-line-style", "Cycle line style (solid, dashed, dotted)", "Lines", "D", (c) => lineTargets(c).length > 0, (c, dir) => {
+			const els = lineTargets(c);
+			const next = LINE_STYLES[wrap(LINE_STYLES.indexOf(els[0].strokeStyle ?? "solid") + dir, LINE_STYLES.length)];
+			return edit(c, els, (el) => (el.strokeStyle = next));
 		});
 
 		for (const [id, name, width] of LINE_WIDTHS) {
@@ -694,23 +732,35 @@ export default class ExcalidrawHotkeys extends Plugin {
 				id: `line-width-${id}`,
 				name: `Line width ${name.toLowerCase()}`,
 				group: "Lines",
+				oneByOne: true,
 				canRun: (c) => lineTargets(c).length > 0,
 				run: (c) => edit(c, lineTargets(c), (el) => (el.strokeWidth = width)),
 			});
 		}
-		list.push({
-			id: "cycle-line-width",
-			name: "Cycle line width",
-			group: "Lines",
-			keys: [hk(["Alt"], "Q")],
-			canRun: (c) => lineTargets(c).length > 0,
-			run: (c) => {
-				const els = lineTargets(c);
-				const widths = LINE_WIDTHS.map((w) => w[2]);
-				const i = widths.indexOf(els[0].strokeWidth ?? 1);
-				const next = widths[(i + 1) % widths.length];
-				return edit(c, els, (el) => (el.strokeWidth = next));
-			},
+		cycle("cycle-line-width", "Cycle line width (thin, bold, extra bold)", "Lines", "Q", (c) => lineTargets(c).length > 0, (c, dir) => {
+			const els = lineTargets(c);
+			const widths = LINE_WIDTHS.map((w) => w[2]);
+			const i = Math.max(0, widths.indexOf(els[0].strokeWidth ?? 1));
+			const next = widths[wrap(i + dir, widths.length)];
+			return edit(c, els, (el) => (el.strokeWidth = next));
+		});
+
+		// Arrowheads: none, end, both, start.
+		const HEADS: [string | null, string | null][] = [
+			[null, null],
+			[null, "arrow"],
+			["arrow", "arrow"],
+			["arrow", null],
+		];
+		cycle("cycle-arrowheads", "Cycle arrowheads (none, end, both, start)", "Lines", "E", (c) => arrows(c).length > 0, (c, dir) => {
+			const els = arrows(c);
+			const a = els[0];
+			const i = Math.max(0, HEADS.findIndex(([s0, e0]) => !!s0 === !!a.startArrowhead && !!e0 === !!a.endArrowhead));
+			const [start, end] = HEADS[wrap(i + dir, HEADS.length)];
+			return edit(c, els, (el) => {
+				el.startArrowhead = start;
+				el.endArrowhead = end;
+			});
 		});
 
 		for (const end of ["start", "end"] as const) {
@@ -719,7 +769,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				id: `toggle-${end}-arrowhead`,
 				name: `Turn ${end} arrowhead on or off`,
 				group: "Lines",
-				keys: [end === "start" ? hk(["Alt", "Shift"], "E") : hk(["Alt"], "E")],
+				oneByOne: true,
 				canRun: (c) => arrows(c).length > 0,
 				run: (c) => {
 					const els = arrows(c);
@@ -747,23 +797,17 @@ export default class ExcalidrawHotkeys extends Plugin {
 			["center", "Align text centre"],
 			["right", "Align text right"],
 		];
-		list.push({
-			id: "cycle-align",
-			name: "Cycle text align (left, centre, right)",
-			group: "Text",
-			keys: [hk(["Alt"], "A")],
-			canRun: (c) => texts(c).length > 0,
-			run: (c) => {
-				const order = aligns.map((a) => a[0]);
-				const next = order[(order.indexOf(texts(c)[0].textAlign ?? "left") + 1) % order.length];
-				return edit(c, texts(c), (el) => (el.textAlign = next));
-			},
+		cycle("cycle-align", "Cycle text align (left, centre, right)", "Text", "A", (c) => texts(c).length > 0, (c, dir) => {
+			const order = aligns.map((a) => a[0]);
+			const next = order[wrap(order.indexOf(texts(c)[0].textAlign ?? "left") + dir, order.length)];
+			return edit(c, texts(c), (el) => (el.textAlign = next));
 		});
 		for (const [value, name] of aligns) {
 			list.push({
 				id: `align-text-${value}`,
 				name,
 				group: "Text",
+				oneByOne: true,
 				canRun: (c) => texts(c).length > 0,
 				run: (c) => edit(c, texts(c), (el) => (el.textAlign = value)),
 			});
@@ -774,6 +818,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				id: `font-size-${label.replace(" ", "-")}`,
 				name: `Font size ${label}`,
 				group: "Text",
+				oneByOne: true,
 				canRun: (c) => texts(c).length > 0,
 				run: (c) => editText(c, (el) => (el.fontSize = size)),
 			});
@@ -781,11 +826,19 @@ export default class ExcalidrawHotkeys extends Plugin {
 		for (const up of [true, false]) {
 			list.push({
 				id: up ? "font-size-up" : "font-size-down",
-				name: up ? "Font size up" : "Font size down",
+				name: up ? "Font size up (small, medium, large, very large)" : "Font size down",
 				group: "Text",
 				keys: [up ? hk(["Alt"], "G") : hk(["Alt", "Shift"], "G")],
 				canRun: (c) => texts(c).length > 0,
-				run: (c) => editText(c, (el) => (el.fontSize = Math.max(4, Math.round(el.fontSize * (up ? 1.1 : 0.9))))),
+				// Step through the 4 sizes. Past the ends, grow or shrink by a quarter.
+				run: (c) => {
+					const sizes = FONT_SIZES.map((f) => f[1]);
+					const now = texts(c)[0].fontSize;
+					const next = up
+						? (sizes.find((x) => x > now) ?? Math.round(now * 1.25))
+						: ([...sizes].reverse().find((x) => x < now) ?? Math.max(8, Math.round(now * 0.8)));
+					return editText(c, (el) => (el.fontSize = next));
+				},
 			});
 		}
 		for (const [id, name, family] of FONTS) {
@@ -793,21 +846,16 @@ export default class ExcalidrawHotkeys extends Plugin {
 				id: `font-${id}`,
 				name: `Font ${name.toLowerCase()}`,
 				group: "Text",
+				oneByOne: true,
 				canRun: (c) => texts(c).length > 0,
 				run: (c) => editText(c, (el) => (el.fontFamily = family)),
 			});
 		}
-		list.push({
-			id: "cycle-font",
-			name: "Cycle font",
-			group: "Text",
-			keys: [hk(["Alt"], "T")],
-			canRun: (c) => texts(c).length > 0,
-			run: (c) => {
-				const families = FONTS.map((f) => f[2]);
-				const next = families[(families.indexOf(texts(c)[0].fontFamily) + 1) % families.length];
-				return editText(c, (el) => (el.fontFamily = next));
-			},
+		cycle("cycle-font", "Cycle font (hand-drawn, normal, code)", "Text", "T", (c) => texts(c).length > 0, (c, dir) => {
+			const families = FONTS.map((f) => f[2]);
+			const i = Math.max(0, families.indexOf(texts(c)[0].fontFamily));
+			const next = families[wrap(i + dir, families.length)];
+			return editText(c, (el) => (el.fontFamily = next));
 		});
 
 		const withText = (c: Ctx) =>
@@ -862,7 +910,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				id: `duplicate-${name}`,
 				name: `Duplicate ${name} with an arrow`,
 				group: "Duplicate",
-				keys: [hk(["Alt", "Shift"], key)],
+				keys: [hk(["Mod", "Shift"], key)],
 				canRun: (c) => dupSources(c).length > 0,
 				run: async (c) => {
 					const sources = dupSources(c);
@@ -993,7 +1041,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				id: inward ? "zoom-in" : "zoom-out",
 				name: inward ? "Zoom in to the next preset" : "Zoom out to the next preset",
 				group: "Zoom",
-				keys: [hk(["Mod", "Alt"], inward ? "X" : "Z")],
+				keys: [inward ? hk(["Mod", "Alt"], "Z") : hk(["Mod", "Alt", "Shift"], "Z")],
 				canRun: always,
 				run: (c) => {
 					const z = this.currentZoom(c);
@@ -1028,7 +1076,7 @@ function openHotkeySettings(app: App) {
 
 function hotkeyRows(plugin: ExcalidrawHotkeys) {
 	const all = [
-		...plugin.actions.map((a) => ({ id: a.id, name: a.name, group: a.group })),
+		...plugin.visibleActions().map((a) => ({ id: a.id, name: a.name, group: a.group })),
 		{ id: "show-hotkeys", name: "Show my hotkeys", group: "Other" },
 	];
 	return all.map((r) => ({ ...r, keys: plugin.hotkeysFor(r.id).map(hotkeyLabel) }));
@@ -1124,7 +1172,7 @@ class HotkeyListModal extends Modal {
 // ---------------------------------------------------------------------------
 
 type NumberKey = "nudgeStep" | "nudgeStepShift" | "resizePercent" | "duplicateGap" | "fitPadding" | "zoomMs";
-type ToggleKey = "catchKeysFirst" | "showStatusColours" | "diagonalNudge" | "copyText" | "copyFill" | "zoomOnSelection";
+type ToggleKey = "catchKeysFirst" | "showStatusColours" | "showOneByOne" | "shiftGoesBack" | "diagonalNudge" | "copyText" | "copyFill" | "zoomOnSelection";
 
 function parseZoomPresets(v: string): number[] {
 	return v
@@ -1152,6 +1200,7 @@ class HotkeySettingTab extends PluginSettingTab {
 			control: { type: "toggle", key },
 		});
 
+		const st = this.plugin.settings;
 		return [
 			{
 				type: "group",
@@ -1166,76 +1215,127 @@ class HotkeySettingTab extends PluginSettingTab {
 						desc: "Open Settings, Hotkeys for this plugin.",
 						action: () => openHotkeySettings(this.app),
 					},
-					{
-						name: "Use suggested keys",
-						desc: "Give each command without a key its suggested key.",
-						action: () => {
-							void this.plugin.applySuggestedKeys().then((n) => {
-								new Notice(n === 0 ? "Every command already has a key" : `Set ${n} keys`);
-							});
-						},
-					},
-					{
-						name: "Reset all keys to suggested",
-						desc: "Replace every key of this plugin with its suggested key.",
-						action: () => {
-							void this.plugin.applySuggestedKeys(true).then((n) => new Notice(`Reset ${n} keys`));
-						},
-					},
-					toggle("Colours in the status bar", "Show the stroke and fill colour at the bottom right while a drawing is open.", "showStatusColours"),
-					toggle("Catch keys before Excalidraw", "Run these hotkeys before Excalidraw's own keys can use them.", "catchKeysFirst"),
-					{
-						name: "Hotkey note",
-						desc: "Where Save as note writes the list.",
-						control: { type: "text", key: "notePath", placeholder: DEFAULT_SETTINGS.notePath },
-					},
 				],
 			},
 			{
 				type: "group",
-				heading: "Zoom",
 				items: [
 					{
-						name: "Zoom presets",
-						desc: `Percent, separated by commas. Up to ${ZOOM_SLOTS}. Preset 1 is the first number.`,
-						control: {
-							type: "text",
-							key: "zoomPresets",
-							placeholder: "25, 50, 100, 200, 400",
-							validate: (v) => (parseZoomPresets(v).length === 0 ? "Type at least one percent from 10 to 3000" : undefined),
-						},
+						type: "page",
+						name: "Keys",
+						desc: "Suggested keys, hidden commands and the hotkey note.",
+						items: [
+							{
+								type: "group",
+								items: [
+									{
+										name: "Use suggested keys",
+										desc: "Give each command without a key its suggested key.",
+										action: () => {
+											void this.plugin.applySuggestedKeys().then((n) => {
+												new Notice(n === 0 ? "Every command already has a key" : `Set ${n} keys`);
+											});
+										},
+									},
+									{
+										name: "Reset all keys to suggested",
+										desc: "Replace every key of this plugin with its suggested key.",
+										action: () => {
+											void this.plugin.applySuggestedKeys(true).then((n) => new Notice(`Reset ${n} keys`));
+										},
+									},
+									toggle("Shift goes back", "Alt+Shift with a cycle key goes back one step, for line style, line width, fill style, font, align and arrowheads. Turn off to free those keys.", "shiftGoesBack"),
+									toggle("Show one-by-one commands", "Also list a command for each line style, line width, font, font size, align and arrowhead.", "showOneByOne"),
+									toggle("Catch keys before Excalidraw", "Run these hotkeys before Excalidraw's own keys can use them.", "catchKeysFirst"),
+									{
+										name: "Hotkey note",
+										desc: "Where Save as note writes the list.",
+										control: { type: "text", key: "notePath", placeholder: DEFAULT_SETTINGS.notePath },
+									},
+								],
+							},
+						],
 					},
-					slider("Zoom speed", "Milliseconds for one zoom. 0 is instant.", "zoomMs", 0, 1500, 50),
-					toggle("Zoom on the selection", "With something selected, zoom moves to it.", "zoomOnSelection"),
-				],
-			},
-			this.colourGroup("Pen colours", "For lines, arrows and text. The square shows how it looks in the drawing. Click the circle to change it.", "stroke"),
-			this.colourGroup("Fill colours", "For the inside of boxes, circles and diamonds. The square shows how it looks in the drawing. Click the circle to change it.", "fill"),
-			{
-				type: "group",
-				heading: "Duplicate",
-				items: [
-					toggle("Copy keeps text", "The copy gets the same label as the box.", "copyText"),
-					toggle("Copy keeps fill", "The copy gets the same fill as the box.", "copyFill"),
-					slider("Duplicate gap", "Space between a box and its copy.", "duplicateGap", 10, 300),
-				],
-			},
-			{
-				type: "group",
-				heading: "Moving and sizing",
-				items: [
-					toggle("Diagonal move", "Hold two arrow keys to move the selection on a diagonal.", "diagonalNudge"),
-					slider("Diagonal step", "Pixels per key press.", "nudgeStep", 1, 50),
-					slider("Diagonal step with Shift", "Pixels per key press with Shift held.", "nudgeStepShift", 1, 100),
-					slider("Resize step", "Percent per key press.", "resizePercent", 1, 50),
-					slider("Fit padding", "Space around the text after Fit box to text.", "fitPadding", 0, 100),
+					{
+						type: "page",
+						name: "Colours",
+						desc: "The 8 pen colours and 8 fill colours.",
+						items: [
+							{
+								type: "group",
+								items: [
+									{ name: "Change a colour", desc: "Click its circle. The square next to it shows how it looks in the drawing." },
+									toggle("Colours in the status bar", "Show the pen and fill colour at the bottom right while a drawing is open.", "showStatusColours"),
+								],
+							},
+							this.colourGroup("Pen colours: lines, arrows and text", "stroke"),
+							this.colourGroup("Fill colours: inside of shapes", "fill"),
+						],
+					},
+					{
+						type: "page",
+						name: "Zoom",
+						desc: "Zoom presets and speed.",
+						displayValue: () => st.zoomPresets.map((z) => `${z}%`).join(", "),
+						items: [
+							{
+								type: "group",
+								items: [
+									{
+										name: "Zoom presets",
+										desc: `Percent, separated by commas. Up to ${ZOOM_SLOTS}. Preset 1 is the first number.`,
+										control: {
+											type: "text",
+											key: "zoomPresets",
+											placeholder: "25, 50, 100, 200, 400",
+											validate: (v) => (parseZoomPresets(v).length === 0 ? "Type at least one percent from 10 to 3000" : undefined),
+										},
+									},
+									slider("Zoom speed", "Milliseconds for one zoom. 0 is instant.", "zoomMs", 0, 1500, 50),
+									toggle("Zoom on the selection", "With something selected, zoom moves to it.", "zoomOnSelection"),
+								],
+							},
+						],
+					},
+					{
+						type: "page",
+						name: "Duplicate",
+						desc: "What a copy keeps, and the gap to it.",
+						items: [
+							{
+								type: "group",
+								items: [
+									toggle("Copy keeps text", "The copy gets the same label as the box.", "copyText"),
+									toggle("Copy keeps fill", "The copy gets the same fill as the box.", "copyFill"),
+									slider("Duplicate gap", "Space between a box and its copy.", "duplicateGap", 10, 300),
+								],
+							},
+						],
+					},
+					{
+						type: "page",
+						name: "Moving and sizing",
+						desc: "Diagonal move, resize step and fit padding.",
+						items: [
+							{
+								type: "group",
+								items: [
+									toggle("Diagonal move", "Hold two arrow keys to move the selection on a diagonal.", "diagonalNudge"),
+									slider("Diagonal step", "Pixels per key press.", "nudgeStep", 1, 50),
+									slider("Diagonal step with Shift", "Pixels per key press with Shift held.", "nudgeStepShift", 1, 100),
+									slider("Resize step", "Percent per key press.", "resizePercent", 1, 50),
+									slider("Fit padding", "Space around the text after Fit box to text.", "fitPadding", 0, 100),
+								],
+							},
+						],
+					},
 				],
 			},
 		];
 	}
 
 	/** One row per colour: its key, how it looks in the drawing, a picker and a reset. */
-	private colourGroup(heading: string, desc: string, kind: "stroke" | "fill"): SettingDefinitionItem {
+	private colourGroup(heading: string, kind: "stroke" | "fill"): SettingDefinitionItem {
 		const st = this.plugin.settings;
 		const list = () => (kind === "stroke" ? st.strokeColours : st.fillColours);
 		const defaults = kind === "stroke" ? DEFAULT_SETTINGS.strokeColours : DEFAULT_SETTINGS.fillColours;
@@ -1244,7 +1344,6 @@ class HotkeySettingTab extends PluginSettingTab {
 			type: "group",
 			heading,
 			items: [
-				{ name: "", desc, render: () => {} },
 				...COLOUR_NAMES.map(
 					(colour, i): SettingDefinition => ({
 						name: `${i + 1}. ${colour}`,
@@ -1301,5 +1400,6 @@ class HotkeySettingTab extends PluginSettingTab {
 			st[key as ToggleKey] = value;
 		}
 		await this.plugin.saveSettings();
+		if (key === "showOneByOne" || key === "shiftGoesBack") this.plugin.registerCommands();
 	}
 }

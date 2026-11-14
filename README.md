@@ -16,50 +16,64 @@ Run **Show my hotkeys** at any time to see your keys. Press **Save as note** in 
 
 ## Commands
 
-The suggested keys are all under the left hand, so the right hand stays on the mouse or pen. Alt does a thing. Alt+Shift does the opposite, or the fill.
+The suggested keys are all under the left hand, so the right hand stays on the mouse or pen.
+
+- **Alt + key** does a thing.
+- **Alt + Shift + key** goes back one step on a cycle key (line style, line width, fill style, font, align, arrowheads). You can turn this off in Settings.
+- Other keys use Shift for their own job: Alt+Shift+number is fill, and Ctrl+Shift+W/A/S/D duplicates.
 
 | Command | Suggested key |
 |---|---|
 | **Colour** | |
 | Pen colour 1–8 (lines, arrows, text) | `Alt+1` … `Alt+8` |
 | Fill colour 1–8 (inside of shapes) | `Alt+Shift+1` … `Alt+Shift+8` |
-| Cycle fill style (hachure, cross-hatch, solid, none) | `Alt+F` |
+| Cycle fill style (none, hachure, cross-hatch, solid) | `Alt+F`, back `Alt+Shift+F` |
 | Reset to black with no fill | ``Ctrl+` `` |
 | More see-through / More opaque | `Alt+X` / `Alt+Shift+X` |
 | **Lines** | |
-| Cycle line style (solid, dashed, dotted) | `Alt+D` |
-| Cycle line width (thin, bold, extra bold) | `Alt+Q` |
-| Line style or width, one by one | none |
-| End / start arrowhead on or off | `Alt+E` / `Alt+Shift+E` |
+| Cycle line style (solid, dashed, dotted) | `Alt+D`, back `Alt+Shift+D` |
+| Cycle line width (thin, bold, extra bold) | `Alt+Q`, back `Alt+Shift+Q` |
+| Cycle arrowheads (none, end, both, start) | `Alt+E`, back `Alt+Shift+E` |
 | **Text** | |
-| Cycle text align (left, centre, right) | `Alt+A` |
-| Cycle font (hand-drawn, normal, code) | `Alt+T` |
-| Font size up / down | `Alt+G` / `Alt+Shift+G` |
+| Cycle text align (left, centre, right) | `Alt+A`, back `Alt+Shift+A` |
+| Cycle font (hand-drawn, normal, code) | `Alt+T`, back `Alt+Shift+T` |
+| Font size up / down (small, medium, large, very large) | `Alt+G` / `Alt+Shift+G` |
 | Fit box to text | `Alt+B` |
-| Align, font and font size, one by one | none |
 | **Duplicate with an arrow** | |
-| Up / left / down / right | `Alt+Shift+W` / `A` / `S` / `D` |
+| Up / left / down / right | `Ctrl+Shift+W` / `A` / `S` / `D` |
 | **Size** | |
 | Bigger / smaller (or thicker / thinner line) | `Alt+R` / `Alt+Shift+R` |
 | Wider / narrower | `Alt+C` / `Alt+Shift+C` |
 | Taller / shorter | `Alt+V` / `Alt+Shift+V` |
 | **Zoom** | |
 | Zoom preset 1–9 | `Ctrl+Alt+1` … `Ctrl+Alt+5` |
-| Zoom out / in to the next preset | `Ctrl+Alt+Z` / `Ctrl+Alt+X` |
+| Zoom in / out to the next preset | `Ctrl+Alt+Z` / `Ctrl+Alt+Shift+Z` |
 | **Other** | |
 | Show my hotkeys | none |
+
+A command for each single line style, line width, font, font size, align and arrowhead is hidden. Turn on **Show one-by-one commands** to list them too.
+
+## Colour keys
+
+The colour keys work on what you are using:
+
+- **Something selected:** the key colours it. Your pen stays the same.
+- **Nothing selected:** the key changes your pen, so the next thing you draw or write gets that colour.
+- **Typing a text:** the key colours that text.
+
+Pen keys change lines, arrows and text. Fill keys change only the inside of boxes, circles and diamonds. Each colour key shows a short popup with the colour. The status bar at the bottom right shows your pen and fill colour while a drawing is open.
 
 Hold two arrow keys to move the selection on a diagonal. Hold Shift too for a bigger step. This one is not in the Hotkeys menu.
 
 ## Settings
 
-- **Zoom presets**: type the percents, for example `25, 50, 100, 200, 400`. Preset 1 is the first number.
-- **Zoom speed**: how long one zoom takes. 0 is instant.
-- **Zoom on the selection**: with something selected, the zoom moves to it.
-- **Pen colours** and **Fill colours**: 8 of each. Colour 1 is Excalidraw's own ink: white in dark mode, black in light mode. The square next to each colour shows how it looks in the drawing.
-- **Copy keeps text** and **Copy keeps fill**: what a duplicate takes from its box.
-- **Colours in the status bar**: show the stroke and fill colour at the bottom right.
-- **Catch keys before Excalidraw**: keep this on. Excalidraw uses some of these keys for its own functions.
+The first page has 5 parts:
+
+- **Keys**: use or reset the suggested keys, Shift goes back, show one-by-one commands, catch keys before Excalidraw, and where the hotkey note goes.
+- **Colours**: the 8 pen colours and 8 fill colours, and the status bar colours. Colour 1 is Excalidraw's own ink: white in dark mode, black in light mode. The square next to each colour shows how it looks in the drawing.
+- **Zoom**: the presets, for example `25, 50, 100, 200, 400`, the zoom speed, and zoom on the selection.
+- **Duplicate**: what a copy keeps, and the gap to it.
+- **Moving and sizing**: diagonal move, resize step and fit padding.
 
 Every edit is one undo step. `Ctrl+Z` undoes a duplicate with its arrow in one press.
 
