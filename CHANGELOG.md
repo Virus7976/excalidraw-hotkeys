@@ -1,5 +1,28 @@
 # What's new
 
+## 0.9.0 (15 Nov 2026)
+
+**A list becomes a mind map, and back.** Copy a bullet list from any note. In a drawing, press leader, N, V. Each item becomes a box, joined to the item it sits under. Leader, N, Y copies a map as a list. Leader, N, I puts the list in a note.
+
+**Edit a map like an outline.** Select a box. Alt+Up and Alt+Down move it among its siblings. Alt+Left moves it up a level. Alt+Right moves it under the box above. The map tidies itself after each move.
+
+![A list becomes a mind map](https://raw.githubusercontent.com/Virus7976/excalidraw-hotkeys/0.9.0/docs/media/0.9.0-listmap.gif)
+
+**Arrows go around boxes.** When a box sits between two shapes, a new arrow goes under or over it, not through it.
+
+![An arrow goes around a box](https://raw.githubusercontent.com/Virus7976/excalidraw-hotkeys/0.9.0/docs/media/0.9.0-around.gif)
+
+**One look for the whole drawing.** Leader, K, L. Pick one of five looks. All boxes, lines and text change in one step. One Ctrl+Z undoes it.
+
+![Pick a look](https://raw.githubusercontent.com/Virus7976/excalidraw-hotkeys/0.9.0/docs/media/0.9.0-looks.gif)
+
+**Also new**
+
+- **Fold all** (leader, N, Z) and **open all** (leader, N, O) for a whole mind map.
+- **Label an arrow**: select it, then leader, R, L. You type the label at once.
+- **Export everything** and **Import everything** in Settings, Share. One file holds all your settings, keys, presets and stamps. Use it to move to a new computer.
+- **Lighter on your computer.** The plugin does almost no work when no drawing is open or Obsidian is in the background. Big drawings (1,500 shapes) stay fast.
+
 ## 0.8.1 (15 Nov 2026)
 
 - Folding one box now says "Folded 1 box", not "1 boxes".

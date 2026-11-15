@@ -144,12 +144,14 @@ Press `` ` ``, then a letter, then the next. Esc cancels.
 - `3` Very sketchy
 - `R` Round corners
 - `S` Sharp corners
+- `L` Looks for the whole drawing
 
 ### `R` Arrow shape
 
 - `S` Straight
 - `C` Curved
 - `E` Elbow
+- `L` Label an arrow
 
 ### `B` Change shape
 
@@ -164,6 +166,11 @@ Press `` ` ``, then a letter, then the next. Esc cancels.
 - `C` Connect the selected shapes
 - `T` Tidy the mind map
 - `F` Fold or open a branch
+- `Z` Fold all branches
+- `O` Open all folds
+- `V` Paste a list as a mind map
+- `Y` Copy the map as a list
+- `I` Put the map in a note as a list
 
 ### `Y` Copy, paste and export
 

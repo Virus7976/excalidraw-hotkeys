@@ -524,7 +524,8 @@ const KEYBOARD_KEY = "excalidraw-hotkeys-keyboard";
 
 /** The commands a phone or tablet without a keyboard gets. */
 const TOUCH_COMMANDS = [
-	"search", "mind-child", "mind-sibling", "connect", "tidy-map", "fold-branch",
+	"search", "mind-child", "mind-sibling", "connect", "tidy-map", "fold-branch", "fold-all", "open-all",
+	"map-from-list", "map-to-list", "map-to-note", "label-arrow", "restyle",
 	"layout-flow", "layout-timeline", "layout-kanban", "layout-matrix", "copy-image", "image-to-note",
 	"align-left", "align-centre", "align-top", "align-middle", "spread-across", "spread-down", "tidy-grid",
 ];
@@ -617,7 +618,7 @@ type Box = { x1: number; y1: number; x2: number; y2: number };
  * other, from the middle of each side, with a small gap, then straight, a soft S or bends.
  * Sets the arrow's place and points. Returns false when the boxes overlap and there is no clean way.
  */
-function routeArrow(el: El, a: Box, b: Box, type: string, prefer?: string): boolean {
+function routeArrow(el: El, a: Box, b: Box, type: string, prefer?: string, obstacles: Box[] = []): boolean {
 	const gx = Math.max(b.x1 - a.x2, a.x1 - b.x2);
 	const gy = Math.max(b.y1 - a.y2, a.y1 - b.y2);
 	if (gx < 4 && gy < 4) return false;
@@ -642,6 +643,64 @@ function routeArrow(el: El, a: Box, b: Box, type: string, prefer?: string): bool
 	el.y = start[1];
 	el.angle = 0;
 	shapeArrow(el, [0, 0], [end[0] - start[0], end[1] - start[1]], wide, type);
+	// A box in the way: go around it, above or below (left or right), whichever is shorter.
+	// Only boxes near the two ends count, and never one that overlaps an end.
+	const touches = (o: Box, v: Box) => o.x1 < v.x2 && v.x1 < o.x2 && o.y1 < v.y2 && v.y1 < o.y2;
+	const area = { x1: Math.min(a.x1, b.x1) - 200, y1: Math.min(a.y1, b.y1) - 200, x2: Math.max(a.x2, b.x2) + 200, y2: Math.max(a.y2, b.y2) + 200 };
+	const near = type === "elbow" ? [] : obstacles.filter((o) => touches(o, area) && !touches(o, a) && !touches(o, b));
+	const abs = (el.points ?? []).map(([x, y]): [number, number] => [x + start[0], y + start[1]]);
+	const block = near.length ? boxesHit(abs, near) : [];
+	if (block.length) {
+		const d = (wide ? Math.sign(end[0] - start[0]) : Math.sign(end[1] - start[1])) || 1;
+		const lane = (side: number, bl: Box[]) =>
+			wide
+				? side < 0 ? Math.min(...bl.map((o) => o.y1)) - 20 : Math.max(...bl.map((o) => o.y2)) + 20
+				: side < 0 ? Math.min(...bl.map((o) => o.x1)) - 20 : Math.max(...bl.map((o) => o.x2)) + 20;
+		// Straight arrows go round with right angles. Curved ones swing out and back in two soft S-curves.
+		// Each swing ends before the first box in the way starts, so the curve itself stays clear.
+		const along = (q: [number, number]) => (wide ? q[0] : q[1]) * d;
+		const lo = (o: Box) => (wide ? (d > 0 ? o.x1 : -o.x2) : d > 0 ? o.y1 : -o.y2);
+		const hi = (o: Box) => (wide ? (d > 0 ? o.x2 : -o.x1) : d > 0 ? o.y2 : -o.y1);
+		const path = (v: number, bl: Box[]): [number, number][] => {
+			const run1 = Math.min(90, Math.min(...bl.map(lo)) - along(start) - 12);
+			// (the end pieces take 12 and 14 of that room)
+			const run2 = Math.min(90, along(end) - Math.max(...bl.map(hi)) - 12);
+			if (type === "sharp" || run1 < 30 || run2 < 30)
+				return wide
+					? [start, [start[0] + d * 16, start[1]], [start[0] + d * 16, v], [end[0] - d * 16, v], [end[0] - d * 16, end[1]], end]
+					: [start, [start[0], start[1] + d * 16], [v, start[1] + d * 16], [v, end[1] - d * 16], [end[0], end[1] - d * 16], end];
+			const p1: [number, number] = wide ? [start[0] + d * run1, v] : [v, start[1] + d * run1];
+			const p2: [number, number] = wide ? [end[0] - d * run2, v] : [v, end[1] - d * run2];
+			// A short straight piece at each end, so the arrowhead points straight into the box.
+			const stub = (q: [number, number], k: number): [number, number] => (wide ? [q[0] + d * k, q[1]] : [q[0], q[1] + d * k]);
+			return evenly([start, ...sCurve(stub(start, 12), p1, wide), ...sCurve(p2, stub(end, -14), wide), end], 22);
+		};
+		let best: [number, number][] | null = null;
+		let bestLen = Infinity;
+		for (const side of [-1, 1]) {
+			let bl = block;
+			let p = path(lane(side, bl), bl);
+			for (let k = 0; k < 4; k++) {
+				const more = boxesHit(p, near).filter((o) => !bl.includes(o));
+				if (!more.length) break;
+				bl = [...bl, ...more];
+				p = path(lane(side, bl), bl);
+			}
+			if (boxesHit(p, near).length) continue;
+			const len = p.reduce((sum, q, i) => (i ? sum + Math.hypot(q[0] - p[i - 1][0], q[1] - p[i - 1][1]) : 0), 0);
+			if (len < bestLen) {
+				bestLen = len;
+				best = p;
+			}
+		}
+		if (best) {
+			el.points = best.map(([x, y]): [number, number] => [x - start[0], y - start[1]]);
+			const xs = el.points.map((q) => q[0]);
+			const ys = el.points.map((q) => q[1]);
+			el.width = Math.max(...xs) - Math.min(...xs);
+			el.height = Math.max(...ys) - Math.min(...ys);
+		}
+	}
 	// Tell Excalidraw the ends sit in the middle of each side, so its own redraws agree.
 	if (el.startBinding) el.startBinding = { ...el.startBinding, focus: 0, gap } as El["startBinding"];
 	if (el.endBinding) el.endBinding = { ...el.endBinding, focus: 0, gap } as El["endBinding"];
@@ -679,6 +738,108 @@ function shapeArrow(el: El, a: [number, number], b: [number, number], wide: bool
 	const ys = (el.points ?? []).map((p) => p[1]);
 	el.width = Math.max(...xs) - Math.min(...xs);
 	el.height = Math.max(...ys) - Math.min(...ys);
+}
+
+/** A bullet list as items with a depth. Tabs or spaces both work; a line without a bullet counts too. */
+function parseOutline(text: string): { depth: number; text: string }[] {
+	const rows = text
+		.replace(/\r/g, "")
+		.split("\n")
+		.map((line) => {
+			const m = /^([ \t]*)(?:[-*+]|\d+[.)])?\s*(.*)$/.exec(line);
+			const indent = (m?.[1] ?? "").replace(/\t/g, "    ").length;
+			const body = (m?.[2] ?? "").replace(/^\[[ xX]\]\s*/, "").replace(/^#+\s*/, "").trim();
+			return { indent, text: body };
+		})
+		.filter((r) => r.text);
+	if (rows.length === 0) return [];
+	// Each new indent is one level deeper than the one it sits under.
+	const levels: number[] = [];
+	return rows.map((r) => {
+		while (levels.length && levels[levels.length - 1] > r.indent) levels.pop();
+		if (!levels.length || levels[levels.length - 1] < r.indent) levels.push(r.indent);
+		return { depth: levels.length - 1, text: r.text };
+	});
+}
+
+/** A look for a whole drawing. */
+interface Look {
+	name: string;
+	hint: string;
+	stroke: string;
+	fill: string;
+	ink: string;
+	font: number;
+	roughness: number;
+	width: number;
+	round: boolean;
+}
+
+const LOOKS: Look[] = [
+	{ name: "Clean blue", hint: "Smooth lines, normal font, soft blue", stroke: "#1971c2", fill: "#e7f5ff", ink: "#1864ab", font: 6, roughness: 0, width: 1, round: true },
+	{ name: "Sketchy warm", hint: "Hand-drawn, orange and cream", stroke: "#e8590c", fill: "#fff4e6", ink: "#d9480f", font: 5, roughness: 1, width: 2, round: true },
+	{ name: "Bold grey", hint: "Strong lines, normal font, sharp corners", stroke: "#1e1e1e", fill: "#e9ecef", ink: "#1e1e1e", font: 6, roughness: 0, width: 2, round: false },
+	{ name: "Soft green", hint: "Hand-drawn, green", stroke: "#2f9e44", fill: "#ebfbee", ink: "#2b8a3e", font: 5, roughness: 1, width: 1, round: true },
+	{ name: "Plain ink", hint: "Hand-drawn, black lines, no fill", stroke: "#1e1e1e", fill: "transparent", ink: "#1e1e1e", font: 5, roughness: 1, width: 1, round: true },
+];
+
+/** Does the line from a to b pass through box o (made a little bigger)? */
+function segmentHitsBox(a: [number, number], b: [number, number], o: Box, pad = 6): boolean {
+	const x1 = o.x1 - pad;
+	const y1 = o.y1 - pad;
+	const x2 = o.x2 + pad;
+	const y2 = o.y2 + pad;
+	let t0 = 0;
+	let t1 = 1;
+	const dx = b[0] - a[0];
+	const dy = b[1] - a[1];
+	for (const [p, q] of [
+		[-dx, a[0] - x1],
+		[dx, x2 - a[0]],
+		[-dy, a[1] - y1],
+		[dy, y2 - a[1]],
+	] as [number, number][]) {
+		if (p === 0) {
+			if (q < 0) return false;
+			continue;
+		}
+		const r = q / p;
+		if (p < 0) t0 = Math.max(t0, r);
+		else t1 = Math.min(t1, r);
+		if (t0 > t1) return false;
+	}
+	return true;
+}
+
+/**
+ * The same line with points spaced evenly. Excalidraw draws a curve through every point, and
+ * uneven spacing (many close points, then a long gap) makes it overshoot into small hooks.
+ */
+function evenly(pts: [number, number][], step: number): [number, number][] {
+	const out: [number, number][] = [pts[0]];
+	let carry = 0;
+	for (let i = 1; i < pts.length; i++) {
+		const [x0, y0] = pts[i - 1];
+		const [x1, y1] = pts[i];
+		const len = Math.hypot(x1 - x0, y1 - y0);
+		let at = step - carry;
+		while (at <= len) {
+			out.push([x0 + ((x1 - x0) * at) / len, y0 + ((y1 - y0) * at) / len]);
+			at += step;
+		}
+		carry = len - (at - step);
+	}
+	const last = pts[pts.length - 1];
+	const prev = out[out.length - 1];
+	// Keep the end, and drop a point that would sit right on top of it.
+	if (Math.hypot(last[0] - prev[0], last[1] - prev[1]) < step / 2 && out.length > 1) out.pop();
+	out.push(last);
+	return out;
+}
+
+/** The boxes a line of points runs through. */
+function boxesHit(pts: [number, number][], boxes: Box[]): Box[] {
+	return boxes.filter((o) => pts.some((p, i) => i > 0 && segmentHitsBox(pts[i - 1], p, o)));
 }
 
 const sleepMs = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
@@ -921,6 +1082,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.registerDomEvent(window, "click", (e) => this.coach(e), { capture: true });
 		this.registerDomEvent(window, "pointerdown", (e) => this.onDragStart(e), { capture: true });
 		this.registerDomEvent(window, "pointerup", () => this.onDragEnd(), { capture: true });
+		this.addCommand({ id: "export-all", name: "Export all settings and keys", callback: () => void this.exportAll() });
+		this.addCommand({ id: "import-all", name: "Import all settings and keys", callback: () => this.pickImportAll() });
 		this.addCommand({
 			id: "practice",
 			name: "Practice the keys",
@@ -1002,6 +1165,10 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 	/** Show the stroke and fill colour that the next drawn thing gets. */
 	updateStatus() {
+		// Cheap when idle: no drawing open, a hidden window, or nothing shown means nothing to do.
+		if (activeDocument.hidden) return;
+		const drawing = this.app.workspace.getActiveViewOfType(ItemView)?.getViewType() === "excalidraw";
+		if (!drawing && !this.barEl && !this.statusKey && !this.recording) return;
 		this.updateBar();
 		this.fitBar();
 		const el = this.statusEl;
@@ -1572,8 +1739,12 @@ export default class ExcalidrawHotkeys extends Plugin {
 				...SKETCH.map(([name, r], i): [string, LeaderNode] => [String(i + 1), style(name[0].toUpperCase() + name.slice(1), { roughness: r })]),
 				["R", style("Round corners", { edges: "round" })],
 				["S", style("Sharp corners", { edges: "sharp" })],
+				["L", leaf("Looks for the whole drawing", () => this.pickLook())],
 			]),
-			arrowtype: menu("Arrow shape", ARROW_TYPES.map(([name, t]): [string, LeaderNode] => [name[0].toUpperCase(), style(name[0].toUpperCase() + name.slice(1), { arrowType: t })])),
+			arrowtype: menu("Arrow shape", [
+				...ARROW_TYPES.map(([name, t]): [string, LeaderNode] => [name[0].toUpperCase(), style(name[0].toUpperCase() + name.slice(1), { arrowType: t })]),
+				["L", leaf("Label an arrow", (c) => this.labelArrow(c))],
+			]),
 			shape: menu("Change shape", [
 				["R", leaf("Box", (c) => this.setShape(c, "rectangle"))],
 				["C", leaf("Circle", (c) => this.setShape(c, "ellipse"))],
@@ -1585,6 +1756,11 @@ export default class ExcalidrawHotkeys extends Plugin {
 				["C", leaf("Connect the selected shapes", (c) => this.connect(c))],
 				["T", leaf("Tidy the mind map", (c) => this.tidyMap(c))],
 				["F", leaf("Fold or open a branch", (c) => this.toggleFold(c))],
+				["Z", leaf("Fold all branches", (c) => this.foldAll(c, false))],
+				["O", leaf("Open all folds", (c) => this.foldAll(c, true))],
+				["V", leaf("Paste a list as a mind map", (c) => this.mapFromList(c))],
+				["Y", leaf("Copy the map as a list", (c) => this.mapToList(c))],
+				["I", leaf("Put the map in a note as a list", (c) => this.mapToNote(c))],
 			]),
 			styleclip: menu("Copy, paste and export", [
 				["C", leaf("Copy style", (c) => this.copyStyle(c))],
@@ -2069,6 +2245,9 @@ export default class ExcalidrawHotkeys extends Plugin {
 		for (const t of live) {
 			if (taken.has(t.id) || t.locked || !isCaption(t)) continue;
 			const tb = this.boxOf(t);
+			// Fast check first: most texts are nowhere near the selection.
+			const close = (t.fontSize || 20) * 0.5;
+			if (!owners.some((o) => gapBetween(tb, o.box) <= close || overlap(tb, o.box) >= 0.5)) continue;
 			const o = ownerOf(t, tb, [...owners, ...others]);
 			if (!o || !owners.includes(o)) continue;
 			// Only when it is clearly that drawing's own text: on it, or within half a line of it.
@@ -2101,6 +2280,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 			if (start || end) arrows.set(e.id, { start, end });
 		}
 		const byId = new Map(c.all.map((x) => [x.id, x]));
+		// The boxes an arrow should go around, where they will end up.
+		const obs = this.obstacles(c, moves);
 		const place = (el: El, t: number) => {
 			const m = moves.get(el.id);
 			if (m) {
@@ -2130,7 +2311,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 					return d ? { x1: v.x1 + d.dx, y1: v.y1 + d.dy, x2: v.x2 + d.dx, y2: v.y2 + d.dy } : v;
 				};
 				const type = el.elbowed ? "elbow" : el.roundness ? "round" : "sharp";
-				if (routeArrow(el, shifted(ends[0], s), shifted(ends[1], e), type, way)) return;
+				if (routeArrow(el, shifted(ends[0], s), shifted(ends[1], e), type, way, obs)) return;
 			}
 			const p0 = pts[0];
 			const pn = pts[pts.length - 1];
@@ -2429,8 +2610,19 @@ export default class ExcalidrawHotkeys extends Plugin {
 		// Excalidraw ties the ends to the shapes; the router then lays the line.
 		const id = ea.connectObjects(a.id, null, b.id, null, { startArrowHead: null, endArrowHead: "arrow", numberOfPoints: 0, padding: 8 });
 		const ar = ea.getElement(id);
-		if (!routeArrow(ar, this.boxOf(a), this.boxOf(b), this.arrowType(c), prefer)) markCurve(ar, undefined);
+		if (!routeArrow(ar, this.boxOf(a), this.boxOf(b), this.arrowType(c), prefer, this.obstacles(c))) markCurve(ar, undefined);
 		return id;
+	}
+
+	/** Shapes, images and loose text in the drawing, as boxes an arrow should go around. Moved ones where they will end. */
+	private obstacles(c: Ctx, moves?: Map<string, { dx: number; dy: number }>): Box[] {
+		return c.all
+			.filter((e) => !e.isDeleted && (SHAPES.includes(e.type) || e.type === "image" || (e.type === "text" && !e.containerId)))
+			.map((e) => {
+				const b = this.boxOf(e);
+				const m = moves?.get(e.id);
+				return m ? { x1: b.x1 + m.dx, y1: b.y1 + m.dy, x2: b.x2 + m.dx, y2: b.y2 + m.dy } : b;
+			});
 	}
 
 	/** The arrow shape from Settings, Arrow style: sharp (straight), round (curved) or elbow. */
@@ -2674,8 +2866,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 	}
 
 	/** Space out the whole map the selected box is in, so no branch overlaps another. The top box stays put. */
-	async tidyMap(c: Ctx) {
-		const start = this.currentStop(c);
+	async tidyMap(c: Ctx, order?: Map<string, string[]>, from?: El) {
+		const start = from ?? this.currentStop(c);
 		if (!start || !SHAPES.includes(start.type)) return showInfo("Select a box in the mind map");
 		const root = this.mapRoot(c, start);
 		const kids = new Map<string, El[]>();
@@ -2708,7 +2900,10 @@ export default class ExcalidrawHotkeys extends Plugin {
 		const goal = new Map<string, { x: number; y: number }>();
 		const place = (n: El, at: { x: number; y: number }, side: number) => {
 			goal.set(n.id, at);
-			const list = [...(kids.get(n.id) ?? [])].sort((a, b) => (wide ? this.centreOf(a).y - this.centreOf(b).y : this.centreOf(a).x - this.centreOf(b).x));
+			const want = order?.get(n.id);
+			const list = [...(kids.get(n.id) ?? [])].sort((a, b) =>
+				want ? want.indexOf(a.id) - want.indexOf(b.id) : wide ? this.centreOf(a).y - this.centreOf(b).y : this.centreOf(a).x - this.centreOf(b).x,
+			);
 			const total = list.reduce((s, k) => s + (span.get(k.id) ?? 0), 0) + gapSide * Math.max(0, list.length - 1);
 			const mid = (wide ? at.y : at.x) + along(n) / 2;
 			let pos = mid - total / 2;
@@ -2743,15 +2938,16 @@ export default class ExcalidrawHotkeys extends Plugin {
 			// A fold badge goes with its box.
 			for (const b of c.all.filter((x) => !x.isDeleted && foldBadgeOf(x) === id)) moves.set(b.id, { dx, dy });
 		}
-		if (moves.size === 0) return showInfo("The map is already tidy");
+		if (moves.size === 0) return order ? undefined : showInfo("The map is already tidy");
 		await this.applyMoves(c, moves);
 		this.lastDone = "tidy";
-		showInfo("Mind map tidied");
+		if (!order) showInfo("Mind map tidied");
 	}
 
 	/** Hide the boxes that grow from the selected box, or show them again. */
-	async toggleFold(c: Ctx) {
-		const node = this.currentStop(c);
+	async toggleFold(c: Ctx, given?: El, quiet = false) {
+		const say = (t: string) => (quiet ? undefined : showInfo(t));
+		const node = given ?? this.currentStop(c);
 		if (!node || !SHAPES.includes(node.type)) return showInfo("Select a box in the mind map");
 		const ea = c.ea;
 		const data = (node as unknown as { customData?: Record<string, unknown> }).customData ?? {};
@@ -2770,7 +2966,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 			for (const e of fold.els) ea.elementsDict[e.id] = { ...e, x: e.x + dx, y: e.y + dy, isDeleted: false };
 			await commitEA(ea, [node.id]);
 			const shown = fold.els.filter((e) => SHAPES.includes(e.type)).length;
-			showInfo(`Showing ${shown} hidden ${shown === 1 ? "box" : "boxes"}`);
+			say(`Showing ${shown} hidden ${shown === 1 ? "box" : "boxes"}`);
 			return;
 		}
 		// Fold: everything below this box, with the arrows between, and their labels.
@@ -2803,7 +2999,357 @@ export default class ExcalidrawHotkeys extends Plugin {
 		const badge = ea.addText(node.x + node.width + 8, node.y + node.height / 2 - 10, `+${boxes.size}`);
 		(ea.getElement(badge) as unknown as { customData?: Record<string, unknown> }).customData = { ekhFoldBadge: node.id };
 		await commitEA(ea, [node.id]);
-		showInfo(`Folded ${boxes.size} ${boxes.size === 1 ? "box" : "boxes"}. Same key to show ${boxes.size === 1 ? "it" : "them"}.`);
+		say(`Folded ${boxes.size} ${boxes.size === 1 ? "box" : "boxes"}. Same key to show ${boxes.size === 1 ? "it" : "them"}.`);
+	}
+
+	// -----------------------------------------------------------------------
+	// Mind map as a list, and like an outline
+	// -----------------------------------------------------------------------
+
+	/** The label inside a box, or its own text. */
+	private labelOf(c: Ctx, el: El): string {
+		const t = c.all.find((x) => !x.isDeleted && x.containerId === el.id && x.type === "text");
+		const raw = (t as unknown as { originalText?: string; text?: string } | undefined) ?? el;
+		return (raw.originalText ?? raw.text ?? "").replace(/\s+/g, " ").trim();
+	}
+
+	/** Which way a map grows: side to side ("wide") or up and down. */
+	private mapFlow(c: Ctx, root: El): boolean {
+		const first = this.childrenOf(c, root)[0];
+		if (!first) return true;
+		return Math.abs(this.centreOf(first).x - this.centreOf(root).x) >= Math.abs(this.centreOf(first).y - this.centreOf(root).y);
+	}
+
+	/** A node's children in the order they sit. */
+	private orderedKids(c: Ctx, n: El, wide: boolean): El[] {
+		return this.childrenOf(c, n)
+			.filter((k) => SHAPES.includes(k.type))
+			.sort((a, b) => (wide ? this.centreOf(a).y - this.centreOf(b).y : this.centreOf(a).x - this.centreOf(b).x));
+	}
+
+	/** Make a mind map from a bullet list you copied, at the mouse. One undo step. */
+	async mapFromList(c: Ctx) {
+		let text = "";
+		try {
+			text = await navigator.clipboard.readText();
+		} catch {
+			return showInfo("Could not read what you copied");
+		}
+		const items = parseOutline(text);
+		if (items.length === 0) return showInfo("Copy a bullet list first, then try again");
+		// One top item is the centre. Several top items share a new centre box.
+		const tops = items.filter((i) => i.depth === 0).length;
+		const tree = tops === 1 ? items : [{ depth: 0, text: "Mind map" }, ...items.map((i) => ({ ...i, depth: i.depth + 1 }))];
+		const ea = c.ea;
+		const api = ea.getExcalidrawAPI?.();
+		const st = api?.getAppState() as unknown as Record<string, unknown> | undefined;
+		ea.clear?.();
+		Object.assign(ea.style, {
+			strokeColor: typeof st?.currentItemStrokeColor === "string" ? st.currentItemStrokeColor : "#1e1e1e",
+			backgroundColor: typeof st?.currentItemBackgroundColor === "string" ? st.currentItemBackgroundColor : "transparent",
+			fillStyle: typeof st?.currentItemFillStyle === "string" ? st.currentItemFillStyle : "solid",
+			roughness: Math.min(1, typeof st?.currentItemRoughness === "number" ? st.currentItemRoughness : 1),
+			strokeWidth: 2,
+			fontFamily: typeof st?.currentItemFontFamily === "number" ? st.currentItemFontFamily : 5,
+			fontSize: 20,
+		});
+		const at = ea.getViewLastPointerPosition?.() ?? { x: 0, y: 0 };
+		// Draw the boxes first, then lay them out by their real size:
+		// each level one column, leaves stacked, a parent in the middle of its children.
+		const ids = tree.map((it) => {
+			const tid = ea.addText(0, 0, it.text, { box: "rectangle", textAlign: "center", textVerticalAlign: "middle", wrapAt: 28, boxPadding: 14 });
+			return ea.getElement(tid).containerId ?? tid;
+		});
+		const els = ids.map((id) => ea.getElement(id));
+		const gapX = Math.max(60, this.settings.duplicateGap);
+		const gapY = 20;
+		const colW: number[] = [];
+		tree.forEach((it, i) => (colW[it.depth] = Math.max(colW[it.depth] ?? 0, els[i].width)));
+		const colX = colW.map((_, d) => colW.slice(0, d).reduce((sum, w) => sum + w + gapX, 0));
+		const kids = tree.map((): number[] => []);
+		const parent: number[] = [];
+		const stack: number[] = [];
+		tree.forEach((it, i) => {
+			while (stack.length && tree[stack[stack.length - 1]].depth >= it.depth) stack.pop();
+			parent[i] = stack.length ? stack[stack.length - 1] : -1;
+			if (parent[i] >= 0) kids[parent[i]].push(i);
+			stack.push(i);
+		});
+		const mids: number[] = [];
+		let next = 0;
+		const lay = (i: number): number => {
+			if (kids[i].length === 0) {
+				mids[i] = next + els[i].height / 2;
+				next += els[i].height + gapY;
+			} else {
+				const v = kids[i].map(lay);
+				mids[i] = (v[0] + v[v.length - 1]) / 2;
+			}
+			return mids[i];
+		};
+		tree.forEach((_, i) => parent[i] < 0 && lay(i));
+		tree.forEach((it, i) => {
+			const el = els[i];
+			const dx = at.x + colX[it.depth] - el.x;
+			const dy = at.y + mids[i] - mids[0] - el.height / 2 - el.y;
+			for (const e of ea.getElements()) if (e.id === el.id || e.containerId === el.id) {
+				e.x += dx;
+				e.y += dy;
+			}
+		});
+		tree.forEach((_, i) => {
+			if (parent[i] >= 0) this.niceArrow(c, ea.getElement(ids[parent[i]]), ea.getElement(ids[i]), "wide");
+		});
+		await commitEA(ea, [ids[0]]);
+		showInfo(`Mind map with ${ids.length} boxes`);
+	}
+
+	/** The map the selected box is in, as an indented bullet list. */
+	private mapAsList(c: Ctx): string | null {
+		const start = this.currentStop(c);
+		if (!start || !SHAPES.includes(start.type)) return null;
+		const root = this.mapRoot(c, start);
+		const wide = this.mapFlow(c, root);
+		const lines: string[] = [];
+		const seen = new Set<string>();
+		const walk = (n: El, depth: number) => {
+			if (seen.has(n.id)) return;
+			seen.add(n.id);
+			lines.push(`${"\t".repeat(depth)}- ${this.labelOf(c, n) || "(no label)"}`);
+			for (const k of this.orderedKids(c, n, wide)) walk(k, depth + 1);
+		};
+		walk(root, 0);
+		return lines.join("\n");
+	}
+
+	async mapToList(c: Ctx) {
+		const list = this.mapAsList(c);
+		if (!list) return showInfo("Select a box in the mind map");
+		await navigator.clipboard.writeText(list);
+		showInfo(`Copied the map as a list of ${list.split("\n").length} lines`);
+	}
+
+	mapToNote(c: Ctx) {
+		const list = this.mapAsList(c);
+		if (!list) return showInfo("Select a box in the mind map");
+		new NotePickerModal(this.app, false, (note) => {
+			if (!note) return;
+			void this.app.vault.process(note, (t) => `${t.replace(/\s*$/, "")}\n\n${list}\n`).then(() => showInfo(`Put the map in ${note.basename}`));
+		}, "Put the list at the end of which note?").open();
+	}
+
+	/** Move the selected box up or down among the boxes beside it, then tidy the map. */
+	async moveSibling(c: Ctx, dir: -1 | 1) {
+		const node = this.currentStop(c);
+		const parent = node ? this.parentOf(c, node) : null;
+		if (!node || !parent) return showInfo("Select a box that has a parent in the mind map");
+		const wide = this.mapFlow(c, parent);
+		const list = this.orderedKids(c, parent, wide);
+		const i = list.findIndex((k) => k.id === node.id);
+		const j = i + dir;
+		if (j < 0 || j >= list.length) return showInfo(dir < 0 ? "Already first" : "Already last");
+		[list[i], list[j]] = [list[j], list[i]];
+		await this.tidyMap(c, new Map([[parent.id, list.map((k) => k.id)]]), node);
+	}
+
+	/** Move the selected box one level up (beside its parent) or down (under the box before it). */
+	async moveLevel(c: Ctx, up: boolean) {
+		const node = this.currentStop(c);
+		const parent = node ? this.parentOf(c, node) : null;
+		if (!node || !parent) return showInfo("Select a box that has a parent in the mind map");
+		const wide = this.mapFlow(c, parent);
+		let to: El | null;
+		let order: Map<string, string[]> | undefined;
+		if (up) {
+			to = this.parentOf(c, parent);
+			if (!to) return showInfo("Already at the top level");
+			// Right after its old parent.
+			const kids = this.orderedKids(c, to, wide).map((k) => k.id);
+			kids.splice(kids.indexOf(parent.id) + 1, 0, node.id);
+			order = new Map([[to.id, kids]]);
+		} else {
+			const list = this.orderedKids(c, parent, wide);
+			const i = list.findIndex((k) => k.id === node.id);
+			to = i > 0 ? list[i - 1] : null;
+			if (!to) return showInfo("Needs a box above it to go under");
+			order = new Map([[to.id, [...this.orderedKids(c, to, wide).map((k) => k.id), node.id]]]);
+		}
+		// Swap the arrow from the old parent for one from the new parent.
+		const old = c.all.find((x) => x.type === "arrow" && !x.isDeleted && x.startBinding?.elementId === parent.id && x.endBinding?.elementId === node.id);
+		const ea = c.ea;
+		ea.clear?.();
+		ea.copyViewElementsToEAforEditing([node, parent, to, ...(old ? [old] : [])]);
+		if (old) {
+			ea.getElement(old.id).isDeleted = true;
+			for (const id of [parent.id, node.id]) {
+				const e = ea.getElement(id);
+				e.boundElements = (e.boundElements ?? []).filter((r) => r.id !== old.id);
+			}
+		}
+		this.niceArrow(c, ea.getElement(to.id), ea.getElement(node.id), wide ? "wide" : "tall");
+		await commitEA(ea, [node.id]);
+		const now = this.context();
+		if (now) await this.tidyMap(now, order, node);
+	}
+
+	/** Fold every branch under the top box, or open every fold in the drawing. */
+	async foldAll(c: Ctx, open: boolean) {
+		if (open) {
+			let n = 0;
+			// A fold can hold folds: open again until none are left.
+			for (let round = 0; round < 20; round++) {
+				const now = this.context();
+				const folded = now?.all.find((e) => !e.isDeleted && (e as unknown as { customData?: { ekhFold?: unknown } }).customData?.ekhFold);
+				if (!now || !folded) break;
+				await this.toggleFold(now, folded, true);
+				n++;
+			}
+			return showInfo(n ? "Opened every folded branch" : "Nothing is folded");
+		}
+		const start = this.currentStop(c);
+		if (!start || !SHAPES.includes(start.type)) return showInfo("Select a box in the mind map");
+		const root = this.mapRoot(c, start);
+		const branches = this.childrenOf(c, root).filter((k) => this.childrenOf(c, k).length > 0);
+		if (!branches.length) return showInfo("No branches to fold");
+		for (const b of branches) {
+			const now = this.context();
+			const el = now?.all.find((e) => e.id === b.id && !e.isDeleted);
+			if (now && el) await this.toggleFold(now, el, true);
+		}
+		showInfo(`Folded ${branches.length} ${branches.length === 1 ? "branch" : "branches"}`);
+	}
+
+	// -----------------------------------------------------------------------
+	// Arrow labels and looks
+	// -----------------------------------------------------------------------
+
+	/** Type a label on the selected arrow, or on the arrow into the selected box. */
+	labelArrow(c: Ctx) {
+		const box = this.currentStop(c);
+		const arrow =
+			c.selected.find((e) => e.type === "arrow") ??
+			(box ? c.all.find((x) => x.type === "arrow" && !x.isDeleted && x.endBinding?.elementId === box.id) : undefined);
+		if (!arrow?.points || arrow.points.length < 2) return showInfo("Select an arrow, or a box with an arrow into it");
+		const api = c.ea.getExcalidrawAPI?.();
+		const view = this.app.workspace.getActiveViewOfType(ItemView);
+		const canvas = view?.contentEl.querySelector<HTMLCanvasElement>("canvas.interactive") ?? view?.contentEl.querySelector<HTMLCanvasElement>(".excalidraw canvas");
+		if (!api || !canvas) return;
+		// The middle of the arrow, along its length.
+		const pts = arrow.points.map(([x, y]): [number, number] => [arrow.x + x, arrow.y + y]);
+		const lens = pts.slice(1).map((p, i) => Math.hypot(p[0] - pts[i][0], p[1] - pts[i][1]));
+		let half = lens.reduce((s, v) => s + v, 0) / 2;
+		let mid = pts[0];
+		for (let i = 0; i < lens.length; i++) {
+			if (half <= lens[i]) {
+				const t = lens[i] ? half / lens[i] : 0;
+				mid = [pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t];
+				break;
+			}
+			half -= lens[i];
+		}
+		const s = api.getAppState() as unknown as { scrollX: number; scrollY: number; zoom: { value: number } };
+		const r = canvas.getBoundingClientRect();
+		const clientX = (mid[0] + s.scrollX) * s.zoom.value + r.left;
+		const clientY = (mid[1] + s.scrollY) * s.zoom.value + r.top;
+		api.updateScene({ appState: { selectedElementIds: {} }, captureUpdate: "NEVER" });
+		// A double-click on an arrow is how Excalidraw starts its label.
+		window.setTimeout(() => canvas.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true, clientX, clientY, view: window })), 30);
+	}
+
+	/** Give the whole drawing (or the selection) one look: colours, font, line and sketchiness. */
+	pickLook() {
+		new ListPickerModal(this.app, "Pick a look for the drawing", LOOKS.map((l) => ({ label: l.name, hint: l.hint, value: l })), (look) => {
+			window.setTimeout(() => {
+				const c = this.context();
+				if (c) void this.applyLook(c, look);
+			}, 50);
+		}).open();
+	}
+
+	async applyLook(c: Ctx, look: Look) {
+		const targets = (c.selected.length ? withBoundText(c) : c.all).filter((e) => !e.isDeleted && e.type !== "frame" && e.type !== "image" && e.type !== "embeddable");
+		if (!targets.length) return showInfo("Nothing to restyle");
+		const ea = c.ea;
+		ea.clear?.();
+		ea.copyViewElementsToEAforEditing(targets);
+		for (const el of ea.getElements()) {
+			el.roughness = look.roughness;
+			if (SHAPES.includes(el.type)) {
+				el.strokeColor = look.stroke;
+				el.backgroundColor = look.fill;
+				el.fillStyle = "solid";
+				el.strokeWidth = look.width;
+				if (el.type !== "ellipse") el.roundness = look.round ? { type: el.type === "rectangle" ? 3 : 2 } : null;
+			} else if (el.type === "text") {
+				el.strokeColor = look.ink;
+				el.fontFamily = look.font;
+			} else if (LINEAR.includes(el.type)) {
+				el.strokeColor = look.stroke;
+				if (el.type !== "freedraw") el.strokeWidth = look.width;
+			}
+		}
+		for (const el of ea.getElements()) if (el.type === "text") ea.refreshTextElementSize?.(el.id);
+		await ea.addElementsToView(false, true);
+		showInfo(`Look: ${look.name}`);
+	}
+
+	// -----------------------------------------------------------------------
+	// Everything to a file, and back
+	// -----------------------------------------------------------------------
+
+	static ALL_PATH = "Excalidraw Hotkeys settings.json";
+
+	/** Settings and this plugin's keys, to a file you can take to another vault. */
+	async exportAll() {
+		const hm = (this.app as AppInternals).hotkeyManager;
+		const mine = `${this.manifest.id}:`;
+		const keys = Object.fromEntries(Object.entries(hm?.customKeys ?? {}).filter(([id]) => id.startsWith(mine)));
+		const settings: Record<string, unknown> = { ...this.settings };
+		// Things that belong to this vault or this device stay here.
+		delete settings.coachSeen;
+		delete settings.seenVersion;
+		delete settings.welcomed;
+		const data = { app: "excalidraw-hotkeys", kind: "all", version: 2, settings, keys };
+		const path = normalizePath(ExcalidrawHotkeys.ALL_PATH);
+		const text = JSON.stringify(data, null, 2);
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (file instanceof TFile) await this.app.vault.modify(file, text);
+		else await this.app.vault.create(path, text);
+		new Notice(`Saved everything to ${path}. Copy it to another vault and press Import everything there.`);
+	}
+
+	/** Load settings and keys from a file made by Export everything. */
+	async importAll(file: TFile) {
+		let d: { app?: string; kind?: string; settings?: Partial<HotkeySettings>; keys?: Record<string, Hotkey[]> };
+		try {
+			d = JSON.parse(await this.app.vault.read(file)) as typeof d;
+		} catch {
+			return void new Notice("This file is not a settings file");
+		}
+		if (d.app !== "excalidraw-hotkeys" || d.kind !== "all" || !d.settings) return void new Notice("This file is not a settings file. Use Import for a presets file.");
+		const keep = { coachSeen: this.settings.coachSeen, seenVersion: this.settings.seenVersion, welcomed: true };
+		await this.saveData({ ...this.settings, ...d.settings, ...keep });
+		await this.loadSettings();
+		const hm = (this.app as AppInternals).hotkeyManager;
+		const mine = `${this.manifest.id}:`;
+		let n = 0;
+		for (const [id, keys] of Object.entries(d.keys ?? {})) {
+			if (!id.startsWith(mine) || !Array.isArray(keys)) continue;
+			hm?.setHotkeys?.(id, keys.filter((k) => k && typeof k.key === "string" && Array.isArray(k.modifiers)));
+			n++;
+		}
+		await hm?.save?.();
+		hm?.bake?.();
+		this.registerCommands();
+		this.barKey = "";
+		this.updateBar();
+		new Notice(`Imported all settings and ${n} keys`);
+	}
+
+	pickImportAll() {
+		const files = this.app.vault.getFiles().filter((f) => f.extension === "json");
+		if (files.length === 0) return new Notice(`No .json file in this vault. Put ${ExcalidrawHotkeys.ALL_PATH} in it first.`);
+		new ListPickerModal(this.app, "Find the settings file", files.map((f) => ({ label: f.path, hint: "", value: f })), (f) => void this.importAll(f)).open();
 	}
 
 	// -----------------------------------------------------------------------
@@ -2992,7 +3538,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.dragStart = null;
 		if (!this.settings.followDrags || !(e.target as Node | null)?.instanceOf(HTMLCanvasElement)) return;
 		const c = this.context();
-		if (!c) return;
+		// Only drawings with arrows this plugin laid need a look before the drag.
+		if (!c || !c.all.some((x) => x.type === "arrow" && !x.isDeleted && curveOf(x))) return;
 		this.dragStart = new Map(c.all.filter((x) => !x.isDeleted && !LINEAR.includes(x.type) && x.type !== "text").map((x) => [x.id, this.boxKey(x)]));
 	}
 
@@ -3011,6 +3558,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				return !!el && before.has(el.id) && before.get(el.id) !== this.boxKey(el);
 			};
 			const fixed = new Map<string, El>();
+			const obs = this.obstacles(c);
 			for (const ar of c.all) {
 				if (ar.isDeleted || ar.type !== "arrow" || !curveOf(ar)) continue;
 				const a = ar.startBinding ? byId.get(ar.startBinding.elementId) : undefined;
@@ -3018,7 +3566,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				if (!a || !b || !(moved(a.id) || moved(b.id))) continue;
 				const copy = JSON.parse(JSON.stringify(ar)) as El;
 				const type = copy.elbowed ? "elbow" : copy.roundness ? "round" : "sharp";
-				if (routeArrow(copy, this.boxOf(a), this.boxOf(b), type, curveOf(ar))) fixed.set(ar.id, copy);
+				if (routeArrow(copy, this.boxOf(a), this.boxOf(b), type, curveOf(ar), obs)) fixed.set(ar.id, copy);
 			}
 			if (!fixed.size) return;
 			const elements = api.getSceneElementsIncludingDeleted().map((x: El) => {
@@ -4658,6 +5206,17 @@ fitBar() {
 		add("mind-sibling", "New box beside (mind map)", "Mind map", (c) => this.grow(c, true));
 		add("connect", "Connect the selected shapes with arrows", "Mind map", (c) => this.connect(c), [hk(["Mod", "Alt"], "A")]);
 		add("tidy-map", "Tidy the mind map", "Mind map", (c) => this.tidyMap(c));
+		add("map-from-list", "Paste a list as a mind map", "Mind map", (c) => this.mapFromList(c));
+		add("map-to-list", "Copy the mind map as a list", "Mind map", (c) => this.mapToList(c));
+		add("map-to-note", "Put the mind map in a note as a list", "Mind map", (c) => this.mapToNote(c));
+		add("sibling-up", "Move the box up among its siblings (mind map)", "Mind map", (c) => this.moveSibling(c, -1), [hk(["Alt"], "ArrowUp")]);
+		add("sibling-down", "Move the box down among its siblings (mind map)", "Mind map", (c) => this.moveSibling(c, 1), [hk(["Alt"], "ArrowDown")]);
+		add("level-up", "Move the box up a level (mind map)", "Mind map", (c) => this.moveLevel(c, true), [hk(["Alt"], "ArrowLeft")]);
+		add("level-down", "Move the box down a level (mind map)", "Mind map", (c) => this.moveLevel(c, false), [hk(["Alt"], "ArrowRight")]);
+		add("fold-all", "Fold all branches (mind map)", "Mind map", (c) => this.foldAll(c, false));
+		add("open-all", "Open all folds (mind map)", "Mind map", (c) => this.foldAll(c, true));
+		add("label-arrow", "Label an arrow", "Lines", (c) => this.labelArrow(c));
+		add("restyle", "Pick a look for the whole drawing", "Shapes", () => this.pickLook());
 		add("fold-branch", "Fold or open a branch (mind map)", "Mind map", (c) => this.toggleFold(c));
 		add("layout-flow", "Lay out as a flowchart", "Arrange", (c) => this.layout(c, "flow"));
 		add("layout-timeline", "Lay out as a timeline", "Arrange", (c) => this.layout(c, "timeline"));
@@ -5182,12 +5741,22 @@ class HotkeySettingTab extends PluginSettingTab {
 								heading: "Share",
 								items: [
 									{
-										name: "Export",
+										name: "Export everything",
+										desc: `Save all settings and this plugin's keys to ${ExcalidrawHotkeys.ALL_PATH}, to set up another vault the same way.`,
+										action: () => void this.plugin.exportAll(),
+									},
+									{
+										name: "Import everything",
+										desc: "Load all settings and keys from that file. Replaces what is here.",
+										action: () => this.plugin.pickImportAll(),
+									},
+									{
+										name: "Export presets",
 										desc: `Save your presets, colours, stamps, macros and bar buttons to ${ExcalidrawHotkeys.SHARE_PATH}.`,
 										action: () => void this.plugin.exportShare(),
 									},
 									{
-										name: "Import",
+										name: "Import presets",
 										desc: "Load them from that file in this vault. Presets and colours are replaced. Stamps, macros and buttons are added.",
 										action: () => {
 											this.plugin.importShare();

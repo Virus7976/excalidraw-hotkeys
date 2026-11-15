@@ -1,6 +1,8 @@
 # Excalidraw Hotkeys
 
-Keyboard control for [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) drawings in Obsidian. Colour, fill, line style, fonts, resize, duplicate with an arrow, mind maps, layouts, line up and spread, smooth zoom, pen presets, stamps, macros, a leader key, moving between shapes with keys, and a smart search. On a phone or tablet, one button has every action.
+Draw in [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) with your keyboard. Every colour, fill, line, font and size is one key. Make a mind map from a list, line up shapes, and lay arrows that go around boxes, without moving the mouse to a menu.
+
+It also has layouts, looks for a whole drawing, pen presets, stamps, macros, a leader key, moving between shapes with keys, and a smart search. On a phone or tablet, one button has every action.
 
 ![Demo](docs/demo.gif)
 
@@ -45,8 +47,16 @@ The suggested keys are all under the left hand, so the right hand stays on the m
 | **Shapes** | |
 | Cycle sketchiness (clean, sketchy, very sketchy) | `Alt+S`, back `Alt+Shift+S` |
 | Round or sharp corners | `Ctrl+Alt+R` |
+| Pick a look for the whole drawing | `` ` K L `` |
+| Label an arrow | `` ` R L `` |
 | **Mind map and connect** | |
 | Connect the selected shapes with arrows | `Ctrl+Alt+A` |
+| Move a box up / down among its siblings | `Alt+Up` / `Alt+Down` |
+| Move a box up a level / under the box above | `Alt+Left` / `Alt+Right` |
+| Paste a list as a mind map / copy the map as a list | `` ` N V `` / `` ` N Y `` |
+| Put the map in a note as a list | `` ` N I `` |
+| Tidy the map / fold a branch | `` ` N T `` / `` ` N F `` |
+| Fold all / open all | `` ` N Z `` / `` ` N O `` |
 | **Style** | |
 | Copy style / Paste style | `Ctrl+Alt+C` / `Ctrl+Alt+V` |
 | **Text** | |
@@ -124,7 +134,15 @@ Select a box and press `Tab`. A new box appears with an arrow from yours, and yo
 
 Leader, `N`, `T` tidies the whole map, so no branch overlaps another. Leader, `N`, `F` folds a branch: the boxes under the selected box hide, and a small `+3` says how many. The same key shows them again, next to the box even if you moved it.
 
+Leader, `N`, `Z` folds every branch. Leader, `N`, `O` opens them all.
+
 ![Tidy and fold](docs/media/0.8.0-mindmap.gif)
+
+**From a list, and back.** Copy a bullet list from a note. In a drawing, press leader, `N`, `V`. Each item becomes a box, joined to the item it sits under. Leader, `N`, `Y` copies a map as a list, and leader, `N`, `I` puts the list at the end of a note.
+
+**Edit it like an outline.** Select a box. `Alt+Up` and `Alt+Down` move it among its siblings. `Alt+Left` moves it up a level. `Alt+Right` moves it under the box above it. The map tidies itself after each move.
+
+![A list becomes a mind map](docs/media/0.9.0-listmap.gif)
 
 ### Arrows that look hand-placed
 
@@ -132,9 +150,19 @@ Every arrow this plugin draws (mind map, connect, duplicate) leaves from the sid
 
 When a shape moves (line up, spread, grid, swap), its arrows are laid fresh the same way, so they never end up cutting across a box. An arrow you drew with your own bends keeps them and stretches. This also works when you drag a shape with the mouse (turn it off in Settings → Moving and sizing).
 
+When a box sits between the two shapes, the arrow goes under or over it, not through it.
+
+![An arrow goes around a box](docs/media/0.9.0-around.gif)
+
 ### Shapes and arrows
 
 `Alt+S` makes shapes clean, sketchy or very sketchy. `Ctrl+Alt+R` gives boxes and diamonds round or sharp corners. `Alt+W` makes arrows straight, curved or elbow (right-angle bends). `Shift+C` turns a box into a circle, then a diamond. It keeps the label, the style and the arrows. With nothing selected, these change your pen.
+
+Leader, `K`, `L` gives the whole drawing one look: Clean blue, Sketchy warm, Bold grey, Soft green or Plain ink. All boxes, lines and text change in one step, and one `Ctrl+Z` undoes it.
+
+![Pick a look](docs/media/0.9.0-looks.gif)
+
+Select an arrow and press leader, `R`, `L` to type a label on it.
 
 ### Copy and paste a style
 
@@ -221,7 +249,7 @@ The first page has 9 parts:
 - **Keys**: use or reset the suggested keys, only the basic keys, or the leader key only, show the key when you click a button, what's new after an update, the key panel and its wait time, Shift goes back, show one-by-one commands, catch keys before Excalidraw, and where the hotkey note goes.
 - **Drawing keys**: a key for each tool, for moving between shapes, the mind map, change shape, repeat, and the leader key. Click a key and press any key or combo. The × button removes it.
 - **Leader menu**: the letter for each menu, and your own sequences for any command.
-- **Pen presets**: the preset bar, bar or one ⚡ button (one button on phones and tablets by default), your own bar buttons, share, and rename or delete your presets.
+- **Pen presets**: the preset bar, bar or one ⚡ button (one button on phones and tablets by default), your own bar buttons, and rename or delete your presets. **Share** has **Export everything** and **Import everything**: one file with all your settings, keys, presets and stamps, to move to a new computer.
 - **Stamps and macros**: rename or delete them.
 - **Colours**: the 8 pen colours and 8 fill colours, and the status bar colours. Colour 1 is Excalidraw's own ink: white in dark mode, black in light mode. If you change a colour, its name follows the new colour. The square next to each colour shows how it looks in the drawing.
 - **Zoom**: the presets, for example `25, 50, 100, 200, 400`, the zoom speed, and zoom on the selection.

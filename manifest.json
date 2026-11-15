@@ -1,9 +1,9 @@
 {
 	"id": "excalidraw-hotkeys",
 	"name": "Excalidraw Hotkeys",
-	"version": "0.8.1",
+	"version": "0.9.0",
 	"minAppVersion": "1.13.0",
-	"description": "Hotkeys for Excalidraw: colour, fill, resize, align, duplicate with an arrow. Set every key in Settings, Hotkeys.",
+	"description": "Draw in Excalidraw with your keyboard. One key for each colour, fill, line and size. Mind maps from a list, layouts, and arrows that go around boxes.",
 	"author": "Virus7976",
 	"isDesktopOnly": false
 }
