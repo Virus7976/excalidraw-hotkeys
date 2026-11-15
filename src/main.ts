@@ -14,6 +14,7 @@ import {
 	SettingDefinitionItem,
 	SuggestModal,
 	TFile,
+	setIcon,
 	normalizePath,
 } from "obsidian";
 import { FILLER, match, rank, wordScore, words } from "./smart";
@@ -49,8 +50,32 @@ interface HotkeySettings {
 	fitPadding: number;
 	zoomPresets: number[];
 	zoomMs: number;
+	/** Milliseconds for a move to glide into place. 0 jumps. */
+	moveMs: number;
+	/** How new arrows look: curved (a soft S), straight, elbow, or like your pen. */
+	arrowStyle: string;
 	zoomOnSelection: boolean;
 	notePath: string;
+	/** The last colours you used, newest first. */
+	recentColours: string[];
+	/** Your own buttons on the preset bar: command ids. */
+	barCommands: string[];
+	stamps: Stamp[];
+	macros: (Macro | null)[];
+}
+
+/** A saved group of shapes, placed with one key. Positions start at 0, 0. */
+interface Stamp {
+	name: string;
+	els: El[];
+}
+
+/** One recorded step: a command, a leader sequence or a style from search. */
+type MacroStep = { t: "action"; id: string } | { t: "leader"; keys: string[] } | { t: "style"; style: Style; label: string };
+
+interface Macro {
+	name: string;
+	steps: MacroStep[];
 }
 
 // Colour 1 is Excalidraw's own ink. It looks white in dark mode and black in light mode.
@@ -91,6 +116,9 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 		"follow-arrow-back": "Shift+R",
 		leader: "Backquote",
 		repeat: "G",
+		"mind-child": "Tab",
+		"mind-sibling": "Shift+Tab",
+		"cycle-shape": "Shift+C",
 	},
 	diagonalNudge: true,
 	nudgeStep: 12,
@@ -102,8 +130,14 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 	fitPadding: 30,
 	zoomPresets: [25, 50, 100, 200, 400],
 	zoomMs: 350,
+	moveMs: 160,
+	arrowStyle: "curved",
 	zoomOnSelection: true,
 	notePath: "Excalidraw Hotkeys.md",
+	recentColours: [],
+	barCommands: [],
+	stamps: [],
+	macros: Array<Macro | null>(9).fill(null),
 };
 
 // ---------------------------------------------------------------------------
@@ -150,6 +184,14 @@ interface El {
 	startBinding?: { elementId: string } | null;
 	endBinding?: { elementId: string } | null;
 	points?: [number, number][];
+	angle?: number;
+	locked?: boolean;
+	link?: string | null;
+	frameId?: string | null;
+	name?: string | null;
+	roundness?: { type: number } | null;
+	elbowed?: boolean;
+	index?: string | null;
 }
 
 interface AppState {
@@ -180,6 +222,10 @@ interface EA {
 	getElements(): El[];
 	getElement(id: string): El;
 	addElementsToView(repositionToCursor: boolean, save: boolean): Promise<boolean>;
+	addFrame?(x: number, y: number, w: number, h: number, name?: string): string;
+	addElementsToFrame?(frameId: string, ids: string[]): void;
+	getViewLastPointerPosition?(): { x: number; y: number } | null;
+	viewZoomToElements?(select: boolean, els: El[]): void;
 	refreshTextElementSize?(id: string): void;
 	getExcalidrawAPI?(): ExcalidrawAPI | null;
 	connectObjects(
@@ -187,7 +233,7 @@ interface EA {
 		ca: string | null,
 		b: string,
 		cb: string | null,
-		formatting: { startArrowHead: string | null; endArrowHead: string | null; numberOfPoints: number },
+		formatting: { startArrowHead: string | null; endArrowHead: string | null; numberOfPoints: number; padding?: number },
 	): string;
 }
 
@@ -258,6 +304,12 @@ interface Style {
 	textAlign?: string;
 	startArrowhead?: string | null;
 	endArrowhead?: string | null;
+	/** 0 clean (architect), 1 sketchy (artist), 2 very sketchy (cartoonist). */
+	roughness?: number;
+	/** Box and diamond corners. */
+	edges?: string;
+	/** Arrow shape: sharp is straight, round is curved, elbow has right-angle bends. */
+	arrowType?: string;
 }
 
 interface Preset {
@@ -280,13 +332,21 @@ const PEN_KEYS: Record<keyof Style, string> = {
 	textAlign: "currentItemTextAlign",
 	startArrowhead: "currentItemStartArrowhead",
 	endArrowhead: "currentItemEndArrowhead",
+	roughness: "currentItemRoughness",
+	edges: "currentItemRoundness",
+	arrowType: "currentItemArrowType",
 };
+
+const SKETCH: [string, number][] = [["clean", 0], ["sketchy", 1], ["very sketchy", 2]];
+const ARROW_TYPES: [string, string][] = [["straight", "sharp"], ["curved", "round"], ["elbow", "elbow"]];
 
 /** One step of a key sequence: a menu of keys, or a thing to do. */
 interface LeaderNode {
 	label: string;
 	children?: Map<string, LeaderNode>;
 	run?: (c: Ctx) => unknown;
+	/** Not saved in a macro: the macro keys themselves. */
+	noRecord?: boolean;
 }
 
 /** One thing the search can find: a style, several styles at once, or a command. */
@@ -297,6 +357,7 @@ interface SearchItem {
 	kind: string;
 	style?: Style;
 	run?: (c: Ctx) => unknown;
+	actionId?: string;
 }
 
 /** A key sequence of your own after the leader key, for any command. */
@@ -319,7 +380,19 @@ const LEADER_MENUS: [string, string, string][] = [
 	["opacity", "Opacity", "O"],
 	["presets", "Pen presets", "P"],
 	["zoom", "Zoom", "V"],
-	["arrange", "Line up and spread", "L"],
+	["arrange", "Line up, spread and size", "L"],
+	["sketch", "Sketchy and corners", "K"],
+	["arrowtype", "Arrow shape", "R"],
+	["shape", "Change shape", "B"],
+	["mind", "Connect and mind map", "N"],
+	["styleclip", "Copy and paste style", "Y"],
+	["similar", "Select similar", "M"],
+	["turn", "Turn, flip and lock", "U"],
+	["link", "Link to a note", "I"],
+	["frames", "Frames", "G"],
+	["stamps", "Stamps", "J"],
+	["recent", "Recent colours", "D"],
+	["macros", "Macros", "Q"],
 	["search", "Search", "Slash"],
 ];
 
@@ -376,6 +449,191 @@ async function edit(c: Ctx, els: El[], fn: (el: El) => void) {
 	for (const el of c.ea.getElements()) fn(el);
 	await c.ea.addElementsToView(false, true);
 }
+
+/** A copy of an element with a new id, moved by ox, oy. Not tied to anything. */
+function cloneEl(el: El, ox: number, oy: number): El {
+	const copy = JSON.parse(JSON.stringify(el)) as El;
+	copy.id = newId();
+	copy.seed = newSeed();
+	copy.versionNonce = newSeed();
+	copy.version = 1;
+	copy.x += ox;
+	copy.y += oy;
+	copy.boundElements = [];
+	copy.groupIds = [];
+	copy.index = null;
+	return copy;
+}
+
+/**
+ * Put everything the EA holds into the scene in one update, and select some of it.
+ * One update means one Ctrl+Z takes it all back.
+ */
+async function commitEA(ea: EA, select: string[]) {
+	const api = ea.getExcalidrawAPI?.();
+	if (!api) {
+		await ea.addElementsToView(false, true);
+		return;
+	}
+	const changed = new Map<string, El>(ea.getElements().map((x: El) => [x.id, x]));
+	const merged = api.getSceneElementsIncludingDeleted().map((x: El) => {
+		const n = changed.get(x.id);
+		if (!n) return x;
+		changed.delete(x.id);
+		return { ...n, version: (x.version ?? 1) + 1, versionNonce: newSeed() };
+	});
+	merged.push(...changed.values());
+	const selectedElementIds = Object.fromEntries(select.map((id) => [id, true]));
+	api.updateScene({ elements: merged, appState: { selectedElementIds }, captureUpdate: "IMMEDIATELY" });
+}
+
+/** Select these elements, and nothing else. */
+function selectIds(c: Ctx, ids: string[]) {
+	c.ea.getExcalidrawAPI?.()?.updateScene({ appState: { selectedElementIds: Object.fromEntries(ids.map((id) => [id, true])), selectedGroupIds: {} }, captureUpdate: "NEVER" });
+}
+
+/** Send a key to Excalidraw itself, for the things it already does well. */
+function excalidrawKey(key: string, code: string, shift = false, ctrl = false) {
+	const target = (activeDocument.activeElement as HTMLElement | null) ?? activeDocument.body;
+	target.dispatchEvent(new KeyboardEvent("keydown", { key, code, shiftKey: shift, ctrlKey: ctrl, bubbles: true, cancelable: true }));
+}
+
+/** "#f80", "#ff8800" or "ff8800" as "#ff8800". Six letters without # need a digit, so words like "facade" stay words. */
+function hexIn(text: string): string | null {
+	const m = /(?:^|\s)#([0-9a-f]{6}|[0-9a-f]{3})(?=\s|$)/i.exec(text) ?? /(?:^|\s)((?=[a-f]*\d)[0-9a-f]{6})(?=\s|$)/i.exec(text);
+	if (!m) return null;
+	const h = m[1].toLowerCase();
+	return `#${h.length === 3 ? [...h].map((x) => x + x).join("") : h}`;
+}
+
+/** Make an arrow straight, curved or elbow. An elbow arrow gets right-angle bends between its two ends. */
+function setArrowType(el: El, type: string) {
+	const pts = el.points ?? [[0, 0], [el.width, el.height]];
+	const a = pts[0];
+	const b = pts[pts.length - 1];
+	const rec = el as unknown as Record<string, unknown>;
+	if (type === "elbow") {
+		el.elbowed = true;
+		el.roundness = null;
+		const wide = Math.abs(b[0] - a[0]) >= Math.abs(b[1] - a[1]);
+		const mid: [number, number][] = wide
+			? [[(a[0] + b[0]) / 2, a[1]], [(a[0] + b[0]) / 2, b[1]]]
+			: [[a[0], (a[1] + b[1]) / 2], [b[0], (a[1] + b[1]) / 2]];
+		el.points = [a, ...mid, b];
+		rec.fixedSegments = null;
+		rec.startIsSpecial = false;
+		rec.endIsSpecial = false;
+		return;
+	}
+	if (el.elbowed) el.points = [a, b];
+	el.elbowed = false;
+	el.roundness = type === "round" ? { type: 2 } : null;
+}
+
+/**
+ * A soft S from one end to the other, the way a person draws a connector between two boxes
+ * that are not in line: out of one side, a smooth bend, into the facing side.
+ * Excalidraw draws a curve through every point, so the S is a smooth curve sampled at a few
+ * points. Fewer points make Excalidraw overshoot and loop.
+ * Wide means it leaves sideways; else it leaves from the top or bottom.
+ */
+function sCurve(a: [number, number], b: [number, number], wide: boolean): [number, number][] {
+	const mx = (a[0] + b[0]) / 2;
+	const my = (a[1] + b[1]) / 2;
+	const c1: [number, number] = wide ? [mx, a[1]] : [a[0], my];
+	const c2: [number, number] = wide ? [mx, b[1]] : [b[0], my];
+	const n = 8;
+	return Array.from({ length: n + 1 }, (_, i): [number, number] => {
+		const t = i / n;
+		const u = 1 - t;
+		const k = [u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t];
+		return [k[0] * a[0] + k[1] * c1[0] + k[2] * c2[0] + k[3] * b[0], k[0] * a[1] + k[1] * c1[1] + k[2] * c2[1] + k[3] * b[1]];
+	});
+}
+
+/** The way a nice arrow was drawn, kept on the arrow so a move can draw it fresh. */
+const curveOf = (el: El): string | undefined => ((el as unknown as { customData?: { ekhCurve?: string } }).customData ?? {}).ekhCurve;
+
+function markCurve(el: El, way: string | undefined) {
+	const rec = el as unknown as { customData?: Record<string, unknown> };
+	const data = { ...(rec.customData ?? {}) };
+	if (way) data.ekhCurve = way;
+	else delete data.ekhCurve;
+	rec.customData = Object.keys(data).length ? data : undefined;
+}
+
+type Box = { x1: number; y1: number; x2: number; y2: number };
+
+/**
+ * Lay an arrow between two boxes the way a person would: out of the sides that face each
+ * other, from the middle of each side, with a small gap, then straight, a soft S or bends.
+ * Sets the arrow's place and points. Returns false when the boxes overlap and there is no clean way.
+ */
+function routeArrow(el: El, a: Box, b: Box, type: string, prefer?: string): boolean {
+	const gx = Math.max(b.x1 - a.x2, a.x1 - b.x2);
+	const gy = Math.max(b.y1 - a.y2, a.y1 - b.y2);
+	if (gx < 4 && gy < 4) return false;
+	// Keep the way the diagram flows (a map that grows right stays side to side), when there is room.
+	const wide = prefer === "wide" && gx >= 4 ? true : prefer === "tall" && gy >= 4 ? false : gx >= gy;
+	const gap = 8;
+	const mid = (v: Box): [number, number] => [(v.x1 + v.x2) / 2, (v.y1 + v.y2) / 2];
+	const [ax, ay] = mid(a);
+	const [bx, by] = mid(b);
+	let start: [number, number];
+	let end: [number, number];
+	if (wide) {
+		const right = bx >= ax;
+		start = [right ? a.x2 + gap : a.x1 - gap, ay];
+		end = [right ? b.x1 - gap : b.x2 + gap, by];
+	} else {
+		const down = by >= ay;
+		start = [ax, down ? a.y2 + gap : a.y1 - gap];
+		end = [bx, down ? b.y1 - gap : b.y2 + gap];
+	}
+	el.x = start[0];
+	el.y = start[1];
+	el.angle = 0;
+	shapeArrow(el, [0, 0], [end[0] - start[0], end[1] - start[1]], wide, type);
+	// Tell Excalidraw the ends sit in the middle of each side, so its own redraws agree.
+	if (el.startBinding) el.startBinding = { ...el.startBinding, focus: 0, gap } as El["startBinding"];
+	if (el.endBinding) el.endBinding = { ...el.endBinding, focus: 0, gap } as El["endBinding"];
+	return true;
+}
+
+/** Make a nice arrow line between two ends: straight when nearly in line, else the S (or bends for elbow). */
+function shapeArrow(el: El, a: [number, number], b: [number, number], wide: boolean, type: string) {
+	const off = wide ? Math.abs(b[1] - a[1]) : Math.abs(b[0] - a[0]);
+	if (type === "elbow") {
+		const rec = el as unknown as Record<string, unknown>;
+		el.elbowed = true;
+		el.roundness = null;
+		el.points =
+			off < 2
+				? [a, b]
+				: wide
+					? [a, [(a[0] + b[0]) / 2, a[1]], [(a[0] + b[0]) / 2, b[1]], b]
+					: [a, [a[0], (a[1] + b[1]) / 2], [b[0], (a[1] + b[1]) / 2], b];
+		rec.fixedSegments = null;
+		rec.startIsSpecial = false;
+		rec.endIsSpecial = false;
+	} else if (type === "sharp" || off < 6) {
+		el.points = [a, b];
+		el.elbowed = false;
+		el.roundness = type === "sharp" ? null : { type: 2 };
+	} else {
+		el.points = sCurve(a, b, wide);
+		el.elbowed = false;
+		el.roundness = { type: 2 };
+	}
+	// Remember the way, so it is drawn fresh when a shape at either end moves.
+	markCurve(el, wide ? "wide" : "tall");
+	const xs = (el.points ?? []).map((p) => p[0]);
+	const ys = (el.points ?? []).map((p) => p[1]);
+	el.width = Math.max(...xs) - Math.min(...xs);
+	el.height = Math.max(...ys) - Math.min(...ys);
+}
+
+const sleepMs = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
 
 let colourNotice: Notice | null = null;
 /** Stops the tool key button that is waiting for a key, if any. */
@@ -514,6 +772,9 @@ function describeStyle(s: Style, st: HotkeySettings): string {
 		const b = !!s.endArrowhead;
 		parts.push(a && b ? "both arrowheads" : a ? "start arrowhead" : b ? "end arrowhead" : "no arrowheads");
 	}
+	if (s.roughness !== undefined && s.roughness !== 1) parts.push(SKETCH.find((k) => k[1] === s.roughness)?.[0] ?? `sketch ${s.roughness}`);
+	if (s.edges !== undefined && s.edges !== "round") parts.push("sharp corners");
+	if (s.arrowType !== undefined && s.arrowType !== "round") parts.push(`${ARROW_TYPES.find((t) => t[1] === s.arrowType)?.[0] ?? s.arrowType} arrow`);
 	return parts.join(", ") || "empty";
 }
 
@@ -566,6 +827,11 @@ function hotkeyLabel(h: Hotkey): string {
 // ---------------------------------------------------------------------------
 
 export default class ExcalidrawHotkeys extends Plugin {
+	/** The guide as Markdown. */
+	guideMarkdown(): string {
+		return guideMarkdown(this);
+	}
+
 	settings: HotkeySettings = DEFAULT_SETTINGS;
 	actions: Action[] = [];
 	private pressed = new Set<string>();
@@ -583,6 +849,12 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.actions = this.buildActions();
 
 		this.registerCommands();
+
+		this.addCommand({
+			id: "guide",
+			name: "Open the guide",
+			callback: () => new GuideModal(this.app, this).open(),
+		});
 
 		this.addCommand({
 			id: "show-hotkeys",
@@ -648,6 +920,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 	/** Show the stroke and fill colour that the next drawn thing gets. */
 	updateStatus() {
 		this.updateBar();
+		this.fitBar();
 		const el = this.statusEl;
 		if (!el) return;
 		const view = this.app.workspace.getActiveViewOfType(ItemView);
@@ -657,11 +930,13 @@ export default class ExcalidrawHotkeys extends Plugin {
 				: null;
 		const stroke = st?.currentItemStrokeColor ?? "";
 		const fill = st?.currentItemBackgroundColor ?? "";
-		const key = st ? `${stroke}|${fill}` : "";
+		const rec = !!this.recording;
+		const key = st || rec ? `${stroke}|${fill}|${rec}` : "";
 		if (key === this.statusKey) return;
 		this.statusKey = key;
 		el.empty();
-		el.toggleClass("ekh-hidden", !st);
+		el.toggleClass("ekh-hidden", !st && !rec);
+		if (rec) el.createSpan({ cls: "ekh-rec", text: "Recording", attr: { "aria-label": "Recording a macro. Run Record a macro again to stop.", "data-tooltip-position": "top" } });
 		if (!st) return;
 		const swatch = (label: string, colour: string) => {
 			const s = el.createSpan({ cls: "ekh-swatch", attr: { "aria-label": `${label}: ${colour}`, "data-tooltip-position": "top" } });
@@ -696,6 +971,10 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.settings.leaderMenuKeys = { ...(saved.leaderMenuKeys ?? {}) };
 		this.settings.leaderCustom = (saved.leaderCustom ?? []).map((s) => ({ ...s }));
 		this.settings.presets = Array.from({ length: 9 }, (_, i) => saved.presets?.[i] ?? null);
+		this.settings.recentColours = [...(saved.recentColours ?? [])];
+		this.settings.barCommands = [...(saved.barCommands ?? [])];
+		this.settings.stamps = (saved.stamps ?? []).map((s) => ({ ...s }));
+		this.settings.macros = Array.from({ length: 9 }, (_, i) => saved.macros?.[i] ?? null);
 	}
 
 	async saveSettings() {
@@ -820,6 +1099,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 			if (k === "fillStyle") return SHAPES.includes(el.type);
 			if (k === "strokeWidth" || k === "strokeStyle") return !text && el.type !== "image";
 			if (k === "fontFamily" || k === "fontSize" || k === "textAlign") return text;
+			if (k === "roughness") return !text && el.type !== "image";
+			if (k === "edges") return el.type === "rectangle" || el.type === "diamond";
 			return el.type === "arrow";
 		};
 		// A fill style on a shape with no fill would show nothing, so give it a fill too.
@@ -831,6 +1112,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 				if (!fits(el, k)) continue;
 				if (k === "stroke") el.strokeColor = s.stroke as string;
 				else if (k === "fill") el.backgroundColor = s.fill as string;
+				else if (k === "edges") el.roundness = s.edges === "round" ? { type: el.type === "rectangle" ? 3 : 2 } : null;
+				else if (k === "arrowType") setArrowType(el, s.arrowType ?? "sharp");
 				else (el as unknown as Record<string, unknown>)[k] = s[k];
 			}
 			if (autoFill && SHAPES.includes(el.type) && el.backgroundColor === "transparent") el.backgroundColor = fillColour;
@@ -891,9 +1174,12 @@ export default class ExcalidrawHotkeys extends Plugin {
 				if (SHAPES.includes(shape.type)) s.fillStyle = shape.fillStyle;
 				s.strokeWidth = shape.strokeWidth;
 				s.strokeStyle = shape.strokeStyle;
+				if (shape.type !== "image") s.roughness = shape.roughness;
+				if (shape.type === "rectangle" || shape.type === "diamond") s.edges = shape.roundness ? "round" : "sharp";
 				if (shape.type === "arrow") {
 					s.startArrowhead = shape.startArrowhead ?? null;
 					s.endArrowhead = shape.endArrowhead ?? null;
+					s.arrowType = shape.elbowed ? "elbow" : shape.roundness ? "round" : "sharp";
 				}
 			}
 			if (text) {
@@ -1034,6 +1320,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 	private leader: LeaderNode | null = null;
 	private leaderPath: string[] = [];
+	private leaderKeys: string[] = [];
 
 	startLeader() {
 		const c = this.context();
@@ -1041,6 +1328,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.stopWhichKey();
 		this.leader = this.leaderTree();
 		this.leaderPath = [];
+		this.leaderKeys = [];
 		this.showLeader();
 	}
 
@@ -1082,6 +1370,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 			showInfo(`No key ${comboLabel(combo)} here`);
 			return;
 		}
+		const key = [...(node.children ?? new Map<string, LeaderNode>())].find(([k]) => k.toUpperCase() === combo.toUpperCase())?.[0] ?? combo;
+		this.leaderKeys.push(key);
 		if (next.children) {
 			this.leader = next;
 			this.leaderPath.push(next.label);
@@ -1089,8 +1379,12 @@ export default class ExcalidrawHotkeys extends Plugin {
 			return;
 		}
 		this.endLeader();
-		const c = this.context();
-		if (c && next.run) void this.tracked(c, () => next.run?.(c));
+		if (!next.noRecord) this.record({ t: "leader", keys: [...this.leaderKeys] });
+		const run = next.run;
+		void this.settle().then(() => {
+			const c = this.context();
+			if (c && run) void this.tracked(c, () => run(c));
+		});
 	}
 
 	/** The menu behind the leader key. Letters are picked to be easy to remember, and can be changed in Settings. */
@@ -1101,6 +1395,14 @@ export default class ExcalidrawHotkeys extends Plugin {
 		const style = (label: string, s: Style) => leaf(label, (c) => this.applyStyle(c, s, label));
 		const digits = <T,>(list: T[], make: (t: T, i: number) => LeaderNode): [string, LeaderNode][] =>
 			list.map((t, i) => [String(i + 1), make(t, i)]);
+		/** Saved slots only, each on its own number. */
+		const slots = <T,>(list: (T | null)[], make: (t: T, i: number) => LeaderNode): [string, LeaderNode][] =>
+			list.flatMap((t, i): [string, LeaderNode][] => (t ? [[String(i + 1), make(t, i)]] : []));
+		/** The first free slot, if there is one. */
+		const free = <T,>(list: (T | null)[], make: (i: number) => LeaderNode): [string, LeaderNode][] => {
+			const i = list.findIndex((t) => !t);
+			return i < 0 ? [] : [[String(i + 1), make(i)]];
+		};
 		const lineUp = (label: string, mode: Parameters<ExcalidrawHotkeys["arrange"]>[1]) => leaf(label, (c) => this.arrange(c, mode));
 
 		const menus: Record<string, LeaderNode> = {
@@ -1119,9 +1421,13 @@ export default class ExcalidrawHotkeys extends Plugin {
 				["S", style("Start", { startArrowhead: "arrow", endArrowhead: null })],
 			]),
 			opacity: menu("Opacity", [["0", style("100%", { opacity: 100 })], ...digits([1, 2, 3, 4, 5, 6, 7, 8, 9], (n) => style(`${n * 10}%`, { opacity: n * 10 }))]),
+			// Only saved presets show, plus one free slot to save into: no rows of empty slots.
 			presets: menu("Pen presets", [
-				...digits(st.presets, (p, i) => leaf(p ? p.name : `Preset ${i + 1} (empty)`, (c) => this.usePreset(c, i))),
-				["S", menu("Save pen as preset", digits(st.presets, (p, i) => leaf(p ? `Replace: ${p.name}` : `Preset ${i + 1} (empty)`, (c) => this.savePreset(c, i))))],
+				...slots(st.presets, (p, i) => leaf(p.name, (c) => this.usePreset(c, i))),
+				["S", menu("Save pen as preset", [
+					...slots(st.presets, (p, i) => leaf(`Replace: ${p.name}`, (c) => this.savePreset(c, i))),
+					...free(st.presets, (i) => leaf("New preset", (c) => this.savePreset(c, i))),
+				])],
 			]),
 			zoom: menu("Zoom", digits(st.zoomPresets, (z, i) => leaf(`${z}%`, (c) => this.actions.find((a) => a.id === `zoom-preset-${i + 1}`)?.run(c)))),
 			arrange: menu("Line up and spread", [
@@ -1133,6 +1439,70 @@ export default class ExcalidrawHotkeys extends Plugin {
 				["X", lineUp("Centre top to bottom", "middle")],
 				["H", lineUp("Spread across", "across")],
 				["V", lineUp("Spread down", "down")],
+				["G", leaf("Tidy into a grid", (c) => this.tidyGrid(c))],
+				["P", leaf("Swap two shapes", (c) => this.swap(c))],
+				["Z", menu("Same size", [
+					["W", leaf("Same width", (c) => this.sameSize(c, "width"))],
+					["H", leaf("Same height", (c) => this.sameSize(c, "height"))],
+					["B", leaf("Same width and height", (c) => this.sameSize(c, "both"))],
+				])],
+			]),
+			sketch: menu("Sketchy and corners", [
+				...SKETCH.map(([name, r], i): [string, LeaderNode] => [String(i + 1), style(name[0].toUpperCase() + name.slice(1), { roughness: r })]),
+				["R", style("Round corners", { edges: "round" })],
+				["S", style("Sharp corners", { edges: "sharp" })],
+			]),
+			arrowtype: menu("Arrow shape", ARROW_TYPES.map(([name, t]): [string, LeaderNode] => [name[0].toUpperCase(), style(name[0].toUpperCase() + name.slice(1), { arrowType: t })])),
+			shape: menu("Change shape", [
+				["R", leaf("Box", (c) => this.setShape(c, "rectangle"))],
+				["C", leaf("Circle", (c) => this.setShape(c, "ellipse"))],
+				["D", leaf("Diamond", (c) => this.setShape(c, "diamond"))],
+			]),
+			mind: menu("Connect and mind map", [
+				["N", leaf("New connected box", (c) => this.grow(c, false))],
+				["B", leaf("New box beside", (c) => this.grow(c, true))],
+				["C", leaf("Connect the selected shapes", (c) => this.connect(c))],
+			]),
+			styleclip: menu("Copy and paste style", [
+				["C", leaf("Copy style", (c) => this.copyStyle(c))],
+				["V", leaf("Paste style", (c) => this.pasteStyle(c))],
+			]),
+			similar: menu("Select similar", [
+				["C", leaf("Same pen colour", (c) => this.selectSimilar(c, "colour"))],
+				["F", leaf("Same fill", (c) => this.selectSimilar(c, "fill"))],
+				["T", leaf("Same type", (c) => this.selectSimilar(c, "type"))],
+				["S", leaf("Same style", (c) => this.selectSimilar(c, "style"))],
+			]),
+			turn: menu("Turn, flip and lock", [
+				["E", leaf("Turn right 90°", (c) => this.turn(c, 90))],
+				["Q", leaf("Turn left 90°", (c) => this.turn(c, -90))],
+				["D", leaf("Turn right 15°", (c) => this.turn(c, 15))],
+				["A", leaf("Turn left 15°", (c) => this.turn(c, -15))],
+				["H", leaf("Flip left to right", (c) => this.flip(c, true))],
+				["V", leaf("Flip top to bottom", (c) => this.flip(c, false))],
+				["L", leaf("Lock", (c) => this.lock(c))],
+				["U", leaf("Unlock all", (c) => this.unlockAll(c))],
+			]),
+			link: leaf("Link to a note", (c) => this.linkNote(c)),
+			frames: menu("Frames", [
+				["F", leaf("Put in a frame", (c) => this.wrapInFrame(c))],
+				["N", leaf("Next frame", (c) => this.goFrame(c, 1))],
+				["P", leaf("Previous frame", (c) => this.goFrame(c, -1))],
+			]),
+			stamps: menu("Stamps", [
+				...digits(st.stamps.slice(0, 9), (s, i) => leaf(s.name, (c) => this.dropStamp(c, i))),
+				["S", leaf("Save the selection as a stamp", (c) => this.saveStamp(c))],
+				["Slash", leaf("Find a stamp", () => this.pickStamp())],
+			]),
+			recent: st.recentColours.length
+				? menu("Recent colours", [
+						...digits(st.recentColours.slice(0, 6), (col) => style(`${hueName(col)} pen`, { stroke: col })),
+						["F", menu("Recent fill", digits(st.recentColours.slice(0, 6), (col) => style(`${hueName(col)} fill`, { fill: col })))],
+					])
+				: leaf("Recent colours (none yet)", () => showInfo("Use a colour, and it shows here")),
+			macros: menu("Macros", [
+				...slots(st.macros, (m, i) => leaf(m.name, () => this.playMacro(i))),
+				["R", { label: this.recording ? "Stop recording" : "Record a macro", run: () => this.toggleRecord(), noRecord: true }],
 			]),
 			search: leaf("Search styles and commands", () => this.openSearch()),
 		};
@@ -1141,6 +1511,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 			const key = st.leaderMenuKeys[id] ?? def;
 			if (key) root.children?.set(key, menus[id]);
 		}
+		root.children?.set("Shift+Slash", { label: "Guide: how to use all this", run: () => new GuideModal(this.app, this).open(), noRecord: true });
 		if (withCustom) this.addCustom(root);
 		return root;
 	}
@@ -1255,6 +1626,14 @@ export default class ExcalidrawHotkeys extends Plugin {
 		style("Arrowheads: both", "heads", { startArrowhead: "arrow", endArrowhead: "arrow" }, "arrow two double");
 		style("Arrowheads: start", "heads", { startArrowhead: "arrow", endArrowhead: null }, "arrow back");
 		for (let n = 1; n <= 10; n++) style(`Opacity: ${n * 10}%`, "opacity", { opacity: n * 10 }, `${n * 10}`);
+		style("Sketchiness: clean", "sketch", { roughness: 0 }, "architect neat smooth rough");
+		style("Sketchiness: sketchy", "sketch", { roughness: 1 }, "artist rough hand");
+		style("Sketchiness: very sketchy", "sketch", { roughness: 2 }, "cartoonist messy rough loose");
+		style("Corners: round", "edges", { edges: "round" }, "rounded soft edges");
+		style("Corners: sharp", "edges", { edges: "sharp" }, "square pointed edges");
+		style("Arrow shape: straight", "arrowtype", { arrowType: "sharp" }, "arrow direct");
+		style("Arrow shape: curved", "arrowtype", { arrowType: "round" }, "arrow curve bend");
+		style("Arrow shape: elbow", "arrowtype", { arrowType: "elbow" }, "arrow elbowed orthogonal right angle bent");
 		st.presets.forEach((p, i) => {
 			if (p) items.push({ label: `Preset ${i + 1}: ${p.name}`, hint: p.auto ? "" : describeStyle(p.style, st), kind: "preset", style: p.style, words: words(`preset ${i + 1} ${p.name} ${describeStyle(p.style, st)}`) });
 		});
@@ -1264,6 +1643,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				label: a.name,
 				hint: keys.join(", "),
 				kind: "command",
+				actionId: a.id,
 				run: (c) => (a.canRun(c) ? a.run(c) : showInfo(c.selected.length === 0 ? "Select something first" : "This does not change what is selected")),
 				words: words(`${a.name} ${a.group} command`),
 			});
@@ -1273,6 +1653,14 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 	/** Best matches first. Several style words at once ("blue dashed bold") give one combined result on top. */
 	searchSuggestions(query: string, items: SearchItem[]): SearchItem[] {
+		// A colour code, like #ff8800: the pen and the fill in that colour. "fill" first puts fill on top.
+		const hex = hexIn(query);
+		if (hex) {
+			const name = hueName(hex).toLowerCase();
+			const pen: SearchItem = { label: `Pen colour: ${hex}`, hint: name, kind: "pen", style: { stroke: hex }, words: [] };
+			const fill: SearchItem = { label: `Fill colour: ${hex}`, hint: name, kind: "fill", style: { fill: hex }, words: [] };
+			return words(query).includes("fill") ? [fill, pen] : [pen, fill];
+		}
 		const ranked = rank(query, items, (t) => t.words, (t) => t.label).slice(0, 60);
 		const tokens = words(query);
 		const fillMode = tokens.includes("fill");
@@ -1318,7 +1706,10 @@ export default class ExcalidrawHotkeys extends Plugin {
 			window.setTimeout(() => {
 				const now = this.context();
 				if (!now) return;
-				void this.tracked(now, () => (it.style ? this.applyStyle(now, it.style, it.label.replace(/^(Preset \d+|[^:]*): /, "")) : it.run?.(now)));
+				const label = it.label.replace(/^(Preset \d+|[^:]*): /, "");
+				if (it.style) this.record({ t: "style", style: it.style, label });
+				else if (it.actionId) this.record({ t: "action", id: it.actionId });
+				void this.tracked(now, () => (it.style ? this.applyStyle(now, it.style, label) : it.run?.(now)));
 			}, 50);
 		}).open();
 	}
@@ -1371,6 +1762,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		for (const k of Object.keys(after) as (keyof Style)[]) if (after[k] !== before[k]) diff[k] = after[k];
 		if (Object.keys(diff).length === 0) return;
 		const style = diff as Style;
+		this.noteColours(style);
 		this.change = this.change?.sig === sig ? { sig, style: { ...this.change.style, ...style } } : { sig, style };
 	}
 
@@ -1385,8 +1777,31 @@ export default class ExcalidrawHotkeys extends Plugin {
 	}
 
 	/** Run a command and remember what it changed. */
-	runAction(a: Action, c: Ctx): Promise<void> | void {
-		if (a.id === "repeat") return a.run(c);
+	private queue: Promise<void> = Promise.resolve();
+	private waiting = 0;
+
+	/**
+	 * Keys run one after another, each from where the last one left things.
+	 * A key pressed during a glide makes it finish at once.
+	 */
+	runAction(a: Action, given: Ctx): Promise<void> {
+		if (this.playing) return this.runNow(a, given);
+		this.waiting++;
+		const job = this.queue.then(() => {
+			this.waiting--;
+			return this.runNow(a, given, true);
+		});
+		this.queue = job.catch(() => undefined);
+		return job;
+	}
+
+	private async runNow(a: Action, given: Ctx, fresh = false): Promise<void> {
+		await this.settle();
+		// Read the drawing again: the key before this one may have changed it.
+		const c = fresh ? (this.context() ?? given) : given;
+		// The leader key and search save the step they lead to, not themselves.
+		if (!["record-macro", "leader", "search"].includes(a.id)) this.record({ t: "action", id: a.id });
+		if (a.id === "repeat") return void (await a.run(c));
 		return this.tracked(c, () => a.run(c));
 	}
 
@@ -1394,58 +1809,309 @@ export default class ExcalidrawHotkeys extends Plugin {
 	// Line up and spread out
 	// -----------------------------------------------------------------------
 
-	/** The outside box of one element. Lines and arrows use their points. */
+	/** The outside box of one element as you see it. Lines use their points; a turned shape uses its turned corners. */
 	private boxOf(e: El): { x1: number; y1: number; x2: number; y2: number } {
-		if (e.points && e.points.length > 0) {
-			const xs = e.points.map((p) => e.x + p[0]);
-			const ys = e.points.map((p) => e.y + p[1]);
-			return { x1: Math.min(...xs), y1: Math.min(...ys), x2: Math.max(...xs), y2: Math.max(...ys) };
+		let pts: [number, number][] =
+			e.points && e.points.length > 0
+				? e.points.map((p): [number, number] => [e.x + p[0], e.y + p[1]])
+				: [[e.x, e.y], [e.x + e.width, e.y], [e.x + e.width, e.y + e.height], [e.x, e.y + e.height]];
+		const a = e.angle ?? 0;
+		if (Math.abs(a) > 1e-6) {
+			// Excalidraw turns a shape around the middle of its own box.
+			const cx = e.x + e.width / 2;
+			const cy = e.y + e.height / 2;
+			const cos = Math.cos(a);
+			const sin = Math.sin(a);
+			pts = pts.map(([x, y]): [number, number] => [cx + (x - cx) * cos - (y - cy) * sin, cy + (x - cx) * sin + (y - cy) * cos]);
 		}
-		return { x1: e.x, y1: e.y, x2: e.x + e.width, y2: e.y + e.height };
+		const xs = pts.map((p) => p[0]);
+		const ys = pts.map((p) => p[1]);
+		return { x1: Math.min(...xs), y1: Math.min(...ys), x2: Math.max(...xs), y2: Math.max(...ys) };
+	}
+
+	private boxOfAll(els: El[]): { x1: number; y1: number; x2: number; y2: number } {
+		const b = els.map((e) => this.boxOf(e));
+		return { x1: Math.min(...b.map((v) => v.x1)), y1: Math.min(...b.map((v) => v.y1)), x2: Math.max(...b.map((v) => v.x2)), y2: Math.max(...b.map((v) => v.y2)) };
 	}
 
 	/**
-	 * The selection as things that move together: a group, or a box with its label.
-	 * An arrow tied to a shape is left out; it follows its shape.
+	 * The selection as things that move together, the way you see them:
+	 * - a group, a box with its label, and a frame with what is in it;
+	 * - a loose text on or next to a drawing or shape goes with it, like a caption;
+	 * - a caption you did not select comes along when it clearly belongs to a selected drawing.
+	 * An arrow tied to a shape is left out; it follows its shape. Locked things never move.
+	 * With together off, only groups, labels and frames join.
 	 */
-	units(c: Ctx): { els: El[]; box: { x1: number; y1: number; x2: number; y2: number } }[] {
-		const els = withBoundText(c).filter((e) => !e.isDeleted);
-		const byId = new Map(c.all.map((e) => [e.id, e]));
+	units(c: Ctx, together = true): { els: El[]; box: { x1: number; y1: number; x2: number; y2: number } }[] {
+		const live = c.all.filter((e) => !e.isDeleted);
+		const byId = new Map(live.map((e) => [e.id, e]));
+		const bound = (e: El) => (e.type === "arrow" || e.type === "line") && (e.startBinding || e.endBinding);
+		const taken = new Set<string>();
+		const groups: El[][] = [];
+		// Excalidraw also lists what is inside a selected frame as selected. It all goes with the frame.
+		const frames = new Set(c.selected.filter((e) => e.type === "frame").map((e) => e.id));
 		const keyOf = (e: El): string => {
-			const owner = e.type === "text" && e.containerId ? byId.get(e.containerId) ?? e : e;
+			const owner = e.type === "text" && e.containerId ? (byId.get(e.containerId) ?? e) : e;
+			if (owner.frameId && frames.has(owner.frameId)) return owner.frameId;
 			return owner.groupIds?.[owner.groupIds.length - 1] ?? owner.id;
 		};
 		const map = new Map<string, El[]>();
-		for (const e of els) {
-			if ((e.type === "arrow" || e.type === "line") && (e.startBinding || e.endBinding)) continue;
+		for (const e of withBoundText(c)) {
+			if (e.isDeleted || e.locked || bound(e)) continue;
 			const k = keyOf(e);
 			map.set(k, [...(map.get(k) ?? []), e]);
 		}
-		// A selected group member brings the whole group.
-		for (const e of c.all) {
-			if (e.isDeleted) continue;
-			const k = e.groupIds?.[e.groupIds.length - 1];
-			if (k && map.has(k) && !map.get(k)?.includes(e)) map.get(k)?.push(e);
+		// A selected group member brings the whole group. A frame brings what is in it.
+		for (const list of map.values()) {
+			const gid = list[0].groupIds?.[list[0].groupIds.length - 1];
+			const frames = list.filter((e) => e.type === "frame").map((e) => e.id);
+			for (const e of live) {
+				if (list.includes(e) || e.locked) continue;
+				const inGroup = !!gid && keyOf(e) === gid;
+				const inFrame = !!e.frameId && frames.includes(e.frameId);
+				const label = e.type === "text" && !!e.containerId && list.some((x) => x.id === e.containerId);
+				if (inGroup || inFrame || label) list.push(e);
+			}
+			groups.push(list);
 		}
-		return [...map.values()].map((list) => {
-			const boxes = list.map((e) => this.boxOf(e));
-			return {
-				els: list,
-				box: {
-					x1: Math.min(...boxes.map((b) => b.x1)),
-					y1: Math.min(...boxes.map((b) => b.y1)),
-					x2: Math.max(...boxes.map((b) => b.x2)),
-					y2: Math.max(...boxes.map((b) => b.y2)),
-				},
-			};
+		// One thing in two lists (a framed shape that was also selected): keep it in the first.
+		const units = groups
+			.map((list) => list.filter((e) => (taken.has(e.id) ? false : (taken.add(e.id), true))))
+			.filter((list) => list.length > 0)
+			.map((els) => ({ els, box: this.boxOfAll(els) }));
+		if (!together) return units;
+
+		// Captions: a loose text that sits on a shape, or close beside it.
+		const isCaption = (e: El) => e.type === "text" && !e.containerId && !(e.groupIds ?? []).length;
+		const gapBetween = (a: { x1: number; y1: number; x2: number; y2: number }, b: typeof a) =>
+			Math.hypot(Math.max(0, b.x1 - a.x2, a.x1 - b.x2), Math.max(0, b.y1 - a.y2, a.y1 - b.y2));
+		const overlap = (a: { x1: number; y1: number; x2: number; y2: number }, b: typeof a) => {
+			const w = Math.max(0, Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1));
+			const h = Math.max(0, Math.min(a.y2, b.y2) - Math.max(a.y1, b.y1));
+			const area = Math.max(1, (a.x2 - a.x1) * (a.y2 - a.y1));
+			return (w * h) / area;
+		};
+		const reach = (t: El) => Math.max(12, (t.fontSize || 20) * 0.75);
+		/** The drawing or shape a text belongs to, from the ones given: the one it sits on, else the nearest within reach. */
+		const ownerOf = <T extends { box: { x1: number; y1: number; x2: number; y2: number } }>(t: El, tb: T["box"], owners: T[]): T | null => {
+			let best: T | null = null;
+			let bestScore = Infinity;
+			for (const o of owners) {
+				const on = overlap(tb, o.box);
+				const d = gapBetween(tb, o.box);
+				if (on < 0.5 && d > reach(t)) continue;
+				const score = on >= 0.5 ? -on : d;
+				if (score < bestScore) {
+					bestScore = score;
+					best = o;
+				}
+			}
+			return best;
+		};
+		const solo = (u: (typeof units)[number]) => u.els.length === 1 && isCaption(u.els[0]);
+		const owners = units.filter((u) => !solo(u));
+		// Every other shape in the drawing, so a caption that belongs to a neighbour stays with the neighbour.
+		const others = live
+			.filter((e) => !taken.has(e.id) && e.type !== "text" && !bound(e) && e.type !== "frame")
+			.map((e) => ({ els: [e], box: this.boxOf(e) }));
+		for (const u of units.filter(solo)) {
+			const t = u.els[0];
+			const o = ownerOf(t, u.box, [...owners, ...others]);
+			if (!o || !owners.includes(o)) continue;
+			o.els.push(t);
+			o.box = this.boxOfAll(o.els);
+			u.els = [];
+		}
+		// A caption you did not select, on or right next to a selected drawing.
+		for (const t of live) {
+			if (taken.has(t.id) || t.locked || !isCaption(t)) continue;
+			const tb = this.boxOf(t);
+			const o = ownerOf(t, tb, [...owners, ...others]);
+			if (!o || !owners.includes(o)) continue;
+			// Only when it is clearly that drawing's own text: on it, or within half a line of it.
+			if (overlap(tb, o.box) < 0.5 && gapBetween(tb, o.box) > (t.fontSize || 20) * 0.5) continue;
+			o.els.push(t);
+			o.box = this.boxOfAll(o.els);
+			taken.add(t.id);
+		}
+		return units.filter((u) => u.els.length > 0);
+	}
+
+	/**
+	 * Move elements, gliding there. Each move is its end step, or a path over time (for turning).
+	 * Arrows tied to a moved shape follow it. `extra` changes each moved element too, at time t.
+	 * It all lands as one undo step.
+	 */
+	async applyMoves(
+		c: Ctx,
+		moves: Map<string, { dx: number; dy: number; at?: (t: number) => { dx: number; dy: number } }>,
+		extra?: (el: El, t: number) => void,
+	) {
+		const step = (m: { dx: number; dy: number; at?: (t: number) => { dx: number; dy: number } } | undefined, t: number) =>
+			m ? (m.at ? m.at(t) : { dx: m.dx * t, dy: m.dy * t }) : undefined;
+		// Arrows tied to a moved shape: move the tied end with it.
+		const arrows = new Map<string, { start?: string; end?: string }>();
+		for (const e of c.all) {
+			if (e.isDeleted || moves.has(e.id) || !e.points || e.points.length < 2) continue;
+			const start = e.startBinding && moves.has(e.startBinding.elementId) ? e.startBinding.elementId : undefined;
+			const end = e.endBinding && moves.has(e.endBinding.elementId) ? e.endBinding.elementId : undefined;
+			if (start || end) arrows.set(e.id, { start, end });
+		}
+		const byId = new Map(c.all.map((x) => [x.id, x]));
+		const place = (el: El, t: number) => {
+			const m = moves.get(el.id);
+			if (m) {
+				const d = step(m, t) as { dx: number; dy: number };
+				el.x += d.dx;
+				el.y += d.dy;
+				extra?.(el, t);
+				return;
+			}
+			const a = arrows.get(el.id);
+			if (!a || !el.points) return;
+			const s = a.start ? step(moves.get(a.start), t) : undefined;
+			const e = a.end ? step(moves.get(a.end), t) : undefined;
+			const pts = el.points.map((p): [number, number] => [p[0], p[1]]);
+			if (s && e && Math.abs(s.dx - e.dx) < 0.01 && Math.abs(s.dy - e.dy) < 0.01) {
+				el.x += s.dx;
+				el.y += s.dy;
+				return;
+			}
+			const ds = s ?? { dx: 0, dy: 0 };
+			const de = e ?? { dx: 0, dy: 0 };
+			const way = curveOf(el);
+			const ends = [el.startBinding?.elementId, el.endBinding?.elementId].map((id) => (id ? byId.get(id) : undefined));
+			if (ends[0] && ends[1] && (way || pts.length === 2 || el.elbowed)) {
+				const shifted = (x: El, d: { dx: number; dy: number } | undefined) => {
+					const v = this.boxOf(x);
+					return d ? { x1: v.x1 + d.dx, y1: v.y1 + d.dy, x2: v.x2 + d.dx, y2: v.y2 + d.dy } : v;
+				};
+				const type = el.elbowed ? "elbow" : el.roundness ? "round" : "sharp";
+				if (routeArrow(el, shifted(ends[0], s), shifted(ends[1], e), type, way)) return;
+			}
+			const p0 = pts[0];
+			const pn = pts[pts.length - 1];
+			const vx = pn[0] - p0[0];
+			const vy = pn[1] - p0[1];
+			const len2 = vx * vx + vy * vy || 1;
+			el.x += ds.dx;
+			el.y += ds.dy;
+			// Each point moves with the end it is nearer to, so a hand-drawn bend stretches instead of kinking.
+			const moved = pts.map((p, i): [number, number] => {
+				const t = i === 0 ? 0 : i === pts.length - 1 ? 1 : Math.min(1, Math.max(0, ((p[0] - p0[0]) * vx + (p[1] - p0[1]) * vy) / len2));
+				return [p[0] + ds.dx * (1 - t) + de.dx * t - ds.dx, p[1] + ds.dy * (1 - t) + de.dy * t - ds.dy];
+			});
+			el.points = moved;
+			if (el.elbowed) {
+				// An elbow arrow keeps right-angle bends between its new ends.
+				setArrowType(el, "elbow");
+			} else if (way) {
+				// A nice arrow is drawn fresh between the new ends: straight once they line up.
+				shapeArrow(el, moved[0], moved[moved.length - 1], way === "wide", el.roundness ? "round" : "sharp");
+			}
+			const xs = (el.points ?? pts).map((p) => p[0]);
+			const ys = (el.points ?? pts).map((p) => p[1]);
+			el.width = Math.max(...xs) - Math.min(...xs);
+			el.height = Math.max(...ys) - Math.min(...ys);
+		};
+		const ids = new Set([...moves.keys(), ...arrows.keys()]);
+		const targets = c.all.filter((e) => ids.has(e.id));
+		await this.busy(async () => {
+			await this.glide(c, targets, place);
+			await edit(c, targets, (el) => place(el, 1));
 		});
+	}
+
+	private gliding: Promise<void> | null = null;
+	private hurry = false;
+
+	/** Run a gliding change. Only one at a time. */
+	private async busy(fn: () => Promise<void>) {
+		await this.settle();
+		const p = fn();
+		this.gliding = p;
+		try {
+			await p;
+		} finally {
+			if (this.gliding === p) this.gliding = null;
+			this.hurry = false;
+		}
+	}
+
+	/** Finish a running glide at once, so the next change starts from where things really are. */
+	async settle() {
+		if (!this.gliding) return;
+		this.hurry = true;
+		await this.gliding;
+	}
+
+	/** Change elements, gliding size and place to the new values. One undo step. */
+	async editSmooth(c: Ctx, els: El[], fn: (el: El) => void) {
+		const end = new Map(
+			els.map((e) => {
+				const y = JSON.parse(JSON.stringify(e)) as El;
+				fn(y);
+				return [e.id, y];
+			}),
+		);
+		await this.busy(async () => {
+			await this.glide(c, els, (el, t) => {
+				const f = end.get(el.id);
+				if (!f) return;
+				for (const k of ["x", "y", "width", "height"] as const) el[k] = el[k] + (f[k] - el[k]) * t;
+			});
+			await edit(c, els, fn);
+		});
+	}
+
+	/**
+	 * Show elements moving to where they will end, over a short time, without touching undo.
+	 * Then put them back, so the real change is one clean undo step.
+	 */
+	private async glide(c: Ctx, targets: El[], place: (el: El, t: number) => void) {
+		const ms = activeDocument.hidden || c.typing ? 0 : this.settings.moveMs;
+		const api = c.ea.getExcalidrawAPI?.();
+		if (ms <= 0 || !api || targets.length === 0) return;
+		const ids = new Set(targets.map((e) => e.id));
+		const orig = new Map(targets.map((e) => [e.id, e]));
+		const ease = (p: number) => 1 - Math.pow(1 - p, 3);
+		const frameAt = (t: number) =>
+			api.getSceneElementsIncludingDeleted().map((x: El) => {
+				const o = orig.get(x.id);
+				if (!o || !ids.has(x.id)) return x;
+				const y = JSON.parse(JSON.stringify(o)) as El;
+				if (t > 0) place(y, t);
+				return { ...y, versionNonce: newSeed() };
+			});
+		const start = performance.now();
+		let finished = false;
+		await new Promise<void>((resolve) => {
+			const done = () => {
+				finished = true;
+				resolve();
+			};
+			const tick = (now: number) => {
+				if (finished) return;
+				const p = this.hurry || this.waiting > 0 ? 1 : Math.min(1, (now - start) / ms);
+				api.updateScene({ elements: frameAt(ease(p)), captureUpdate: "NEVER" });
+				if (p < 1) window.requestAnimationFrame(tick);
+				else done();
+			};
+			window.requestAnimationFrame(tick);
+			// A window that gets no frames still finishes.
+			window.setTimeout(done, ms + 400);
+		});
+		api.updateScene({ elements: frameAt(0), captureUpdate: "NEVER" });
 	}
 
 	/** Line up or spread out the selection. Arrows tied to a moved shape follow it. */
 	async arrange(c: Ctx, mode: "left" | "right" | "top" | "bottom" | "centre" | "middle" | "across" | "down") {
-		const units = this.units(c);
 		const spread = mode === "across" || mode === "down";
-		if (units.length < (spread ? 3 : 2)) return showInfo(spread ? "Select 3 or more shapes to spread" : "Select 2 or more shapes to line up");
+		const need = spread ? 3 : 2;
+		// Captions go with their drawing. If that leaves too few things, line up each one on its own.
+		let units = this.units(c);
+		if (units.length < need) units = this.units(c, false);
+		if (units.length < need) return showInfo(spread ? "Select 3 or more shapes to spread" : "Select 2 or more shapes to line up");
 		const all = {
 			x1: Math.min(...units.map((u) => u.box.x1)),
 			y1: Math.min(...units.map((u) => u.box.y1)),
@@ -1466,11 +2132,22 @@ export default class ExcalidrawHotkeys extends Plugin {
 			const last = sorted[sorted.length - 1];
 			const span = lo(last) + size(last) - lo(first);
 			const gap = (span - sorted.reduce((s, u) => s + size(u), 0)) / (sorted.length - 1);
-			let at = lo(first) + size(first) + gap;
-			for (const u of sorted.slice(1, -1)) {
-				const d = at - lo(u);
-				move(u, across ? d : 0, across ? 0 : d);
-				at += size(u) + gap;
+			if (gap >= 0) {
+				let at = lo(first) + size(first) + gap;
+				for (const u of sorted.slice(1, -1)) {
+					const d = at - lo(u);
+					move(u, across ? d : 0, across ? 0 : d);
+					at += size(u) + gap;
+				}
+			} else {
+				// Too big to fit with gaps between them: space their middles evenly instead.
+				const mid = (u: (typeof units)[number]) => lo(u) + size(u) / 2;
+				const m0 = mid(first);
+				const step = (mid(last) - m0) / (sorted.length - 1);
+				sorted.slice(1, -1).forEach((u, i) => {
+					const d = m0 + step * (i + 1) - mid(u);
+					move(u, across ? d : 0, across ? 0 : d);
+				});
 			}
 		} else {
 			for (const u of units) {
@@ -1485,49 +2162,640 @@ export default class ExcalidrawHotkeys extends Plugin {
 		}
 		if (moves.size === 0) return showInfo("Already lined up");
 
-		// Arrows tied to a moved shape: move the tied end with it.
-		const arrows = new Map<string, { start?: { dx: number; dy: number }; end?: { dx: number; dy: number } }>();
-		for (const e of c.all) {
-			if (e.isDeleted || moves.has(e.id) || !e.points || e.points.length < 2) continue;
-			const start = e.startBinding ? moves.get(e.startBinding.elementId) : undefined;
-			const end = e.endBinding ? moves.get(e.endBinding.elementId) : undefined;
-			if (start || end) arrows.set(e.id, { start, end });
-		}
-		const ids = new Set([...moves.keys(), ...arrows.keys()]);
-		await edit(
-			c,
-			c.all.filter((e) => ids.has(e.id)),
-			(el) => {
-				const m = moves.get(el.id);
-				if (m) {
-					el.x += m.dx;
-					el.y += m.dy;
-					return;
-				}
-				const a = arrows.get(el.id);
-				if (!a || !el.points) return;
-				const pts = el.points.map((p): [number, number] => [p[0], p[1]]);
-				if (a.start && a.end && a.start.dx === a.end.dx && a.start.dy === a.end.dy) {
-					el.x += a.start.dx;
-					el.y += a.start.dy;
-				} else {
-					if (a.start) {
-						el.x += a.start.dx;
-						el.y += a.start.dy;
-						for (let i = 1; i < pts.length; i++) pts[i] = [pts[i][0] - a.start.dx, pts[i][1] - a.start.dy];
-					}
-					if (a.end) {
-						const i = pts.length - 1;
-						pts[i] = [pts[i][0] + a.end.dx, pts[i][1] + a.end.dy];
-					}
-					el.points = pts;
-					el.width = Math.max(...pts.map((p) => p[0])) - Math.min(...pts.map((p) => p[0]));
-					el.height = Math.max(...pts.map((p) => p[1])) - Math.min(...pts.map((p) => p[1]));
-				}
-			},
-		);
+		await this.applyMoves(c, moves);
 		const names = { left: "Lined up left", right: "Lined up right", top: "Lined up top", bottom: "Lined up bottom", centre: "Centred left to right", middle: "Centred top to bottom", across: "Spread across", down: "Spread down" };
 		showInfo(names[mode]);
+	}
+
+	/** The main shape of each selected unit: a box instead of its label, a group's biggest shape. */
+	private mains(c: Ctx): El[] {
+		return this.units(c).map((u) => {
+			const shapes = u.els.filter((e) => e.type !== "text" && !LINEAR.includes(e.type));
+			const pool = shapes.length ? shapes : u.els;
+			return pool.reduce((a, b) => (a.width * a.height >= b.width * b.height ? a : b));
+		});
+	}
+
+	/** Shapes in the order they sit: left to right when spread wide, else top to bottom. */
+	private inLine(els: El[]): El[] {
+		const xs = els.map((e) => this.centreOf(e).x);
+		const ys = els.map((e) => this.centreOf(e).y);
+		const wide = Math.max(...xs) - Math.min(...xs) >= Math.max(...ys) - Math.min(...ys);
+		return [...els].sort((a, b) => (wide ? this.centreOf(a).x - this.centreOf(b).x : this.centreOf(a).y - this.centreOf(b).y));
+	}
+
+	/** Units sorted like reading: top row first, left to right. Shapes less than half a height apart share a row. */
+	private readingOrder<T extends { box: { x1: number; y1: number; x2: number; y2: number } }>(units: T[]): T[] {
+		const byY = [...units].sort((a, b) => a.box.y1 - b.box.y1);
+		const rows: T[][] = [];
+		for (const u of byY) {
+			const row = rows[rows.length - 1];
+			const h = u.box.y2 - u.box.y1;
+			if (row && Math.abs(row[0].box.y1 - u.box.y1) < h / 2) row.push(u);
+			else rows.push([u]);
+		}
+		return rows.flatMap((r) => r.sort((a, b) => a.box.x1 - b.box.x1));
+	}
+
+	// -----------------------------------------------------------------------
+	// Mind map and connect
+	// -----------------------------------------------------------------------
+
+	private parentOf(c: Ctx, el: El): El | null {
+		const a = c.all.find((x) => x.type === "arrow" && !x.isDeleted && x.endBinding?.elementId === el.id && x.startBinding);
+		return a ? (c.all.find((e) => e.id === a.startBinding?.elementId && !e.isDeleted) ?? null) : null;
+	}
+
+	private childrenOf(c: Ctx, el: El): El[] {
+		return c.all
+			.filter((x) => x.type === "arrow" && !x.isDeleted && x.startBinding?.elementId === el.id && x.endBinding)
+			.map((a) => c.all.find((e) => e.id === a.endBinding?.elementId && !e.isDeleted))
+			.filter((e): e is El => !!e);
+	}
+
+	/** Add a box tied to the selected one (a child), or next to it (a sibling), then type in it. */
+	async grow(c: Ctx, sibling: boolean) {
+		const cur = this.currentStop(c);
+		if (!cur || !SHAPES.includes(cur.type)) return showInfo("Select a box first");
+		const from = sibling ? this.parentOf(c, cur) : cur;
+		const gap = this.settings.duplicateGap;
+		// Room for a few words, even when the box it grows from is small.
+		const w = Math.max(cur.width, 160);
+		const h = Math.max(cur.height, 64);
+		let x: number;
+		let y: number;
+		let flow = "wide";
+		if (from) {
+			// Grow away from the parent's own parent, or the way its children already go. Right by default.
+			const gp = this.parentOf(c, from);
+			const kids = this.childrenOf(c, from);
+			const ref = gp ? { a: gp, b: from } : kids.length ? { a: from, b: kids[0] } : null;
+			let dx = 1;
+			let dy = 0;
+			if (ref) {
+				const vx = this.centreOf(ref.b).x - this.centreOf(ref.a).x;
+				const vy = this.centreOf(ref.b).y - this.centreOf(ref.a).y;
+				[dx, dy] = Math.abs(vx) >= Math.abs(vy) ? [Math.sign(vx) || 1, 0] : [0, Math.sign(vy) || 1];
+			}
+			flow = dx !== 0 ? "wide" : "tall";
+			if (kids.length) {
+				// Next in the row of children.
+				if (dx !== 0) {
+					x = kids[0].x;
+					y = Math.max(...kids.map((k) => k.y + k.height)) + gap / 2;
+				} else {
+					y = kids[0].y;
+					x = Math.max(...kids.map((k) => k.x + k.width)) + gap / 2;
+				}
+			} else {
+				x = dx > 0 ? from.x + from.width + gap : dx < 0 ? from.x - gap - w : from.x + (from.width - w) / 2;
+				y = dy > 0 ? from.y + from.height + gap : dy < 0 ? from.y - gap - h : from.y + (from.height - h) / 2;
+			}
+		} else {
+			// A sibling with no parent: just below.
+			x = cur.x;
+			y = cur.y + cur.height + gap / 2;
+		}
+		const copy = cloneEl(cur, x - cur.x, y - cur.y);
+		copy.width = w;
+		copy.height = h;
+		copy.link = null;
+		// A new box, not a copy: it keeps the style but none of the old box's own data.
+		(copy as unknown as Record<string, unknown>).customData = undefined;
+		const ea = c.ea;
+		ea.copyViewElementsToEAforEditing(from ? [from] : []);
+		ea.elementsDict[copy.id] = copy;
+		if (from) this.niceArrow(c, from, copy, flow);
+		await commitEA(ea, [copy.id]);
+		this.selectOnly(c, copy);
+		// Enter on a selected box opens its label in Excalidraw, so you can type at once.
+		await sleepMs(60);
+		excalidrawKey("Enter", "Enter");
+	}
+
+	/**
+	 * Tie a to b with an arrow placed the way a person would: out of the sides that face each
+	 * other, a small gap at each end, straight when the two are in line, else a soft S.
+	 * It follows your pen's arrow shape: straight, curved (the S) or elbow.
+	 */
+	private niceArrow(c: Ctx, a: El, b: El, prefer?: string): string {
+		const ea = c.ea;
+		// A very sketchy arrow wobbles and looks messy; arrows stay at sketchy at most.
+		Object.assign(ea.style, { strokeColor: a.strokeColor, strokeWidth: Math.min(2, a.strokeWidth ?? 1), roughness: Math.min(1, a.roughness ?? ea.style.roughness) });
+		// Excalidraw ties the ends to the shapes; the router then lays the line.
+		const id = ea.connectObjects(a.id, null, b.id, null, { startArrowHead: null, endArrowHead: "arrow", numberOfPoints: 0, padding: 8 });
+		const ar = ea.getElement(id);
+		if (!routeArrow(ar, this.boxOf(a), this.boxOf(b), this.arrowType(c), prefer)) markCurve(ar, undefined);
+		return id;
+	}
+
+	/** The arrow shape from Settings, Arrow style: sharp (straight), round (curved) or elbow. */
+	arrowType(c: Ctx): string {
+		const st = this.settings.arrowStyle;
+		if (st === "straight") return "sharp";
+		if (st === "elbow") return "elbow";
+		if (st === "pen") {
+			const pen = (c.ea.getExcalidrawAPI?.()?.getAppState() as unknown as Record<string, unknown> | undefined)?.currentItemArrowType;
+			return typeof pen === "string" ? pen : "round";
+		}
+		return "round";
+	}
+
+	/** Tie the selected shapes together with arrows, in the order they sit. */
+	async connect(c: Ctx) {
+		const els = this.inLine(this.mains(c).filter((e) => e.type !== "text"));
+		if (els.length < 2) return showInfo("Select 2 or more shapes to connect");
+		const ea = c.ea;
+		ea.copyViewElementsToEAforEditing(els);
+		const xs = els.map((e) => this.centreOf(e).x);
+		const ys = els.map((e) => this.centreOf(e).y);
+		const flow = Math.max(...xs) - Math.min(...xs) >= Math.max(...ys) - Math.min(...ys) ? "wide" : "tall";
+		for (let i = 0; i + 1 < els.length; i++) this.niceArrow(c, els[i], els[i + 1], flow);
+		await commitEA(ea, els.map((e) => e.id));
+		showInfo(els.length === 2 ? "Connected" : `Connected ${els.length} shapes`);
+	}
+
+	// -----------------------------------------------------------------------
+	// Shapes: change type, sketchiness and corners
+	// -----------------------------------------------------------------------
+
+	/** Turn boxes into circles or diamonds. Null steps to the next shape. Text, style and arrows stay. */
+	async setShape(c: Ctx, type: string | null) {
+		const els = c.selected.filter((e) => SHAPES.includes(e.type));
+		if (els.length === 0) return showInfo("Select a box, circle or diamond");
+		const next = type ?? SHAPES[(SHAPES.indexOf(els[0].type) + 1) % SHAPES.length];
+		await edit(c, els, (el) => {
+			const round = !!el.roundness || el.type === "ellipse";
+			el.type = next;
+			el.roundness = next === "ellipse" || !round ? null : { type: next === "rectangle" ? 3 : 2 };
+		});
+		// Excalidraw places a label for the new shape once the label is touched.
+		const labels = withBoundText(c).filter((e) => e.type === "text");
+		if (labels.length) {
+			c.ea.copyViewElementsToEAforEditing(labels);
+			for (const t of c.ea.getElements()) c.ea.refreshTextElementSize?.(t.id);
+			await c.ea.addElementsToView(false, false);
+		}
+		showInfo(`Shape: ${{ rectangle: "box", ellipse: "circle", diamond: "diamond" }[next] ?? next}`);
+	}
+
+	// -----------------------------------------------------------------------
+	// Copy and paste a style
+	// -----------------------------------------------------------------------
+
+	private styleClip: Style | null = null;
+
+	copyStyle(c: Ctx) {
+		const s = this.currentStyle(c);
+		this.styleClip = s;
+		showInfo(`Copied style: ${describeStyle(s, this.settings)}`);
+	}
+
+	async pasteStyle(c: Ctx) {
+		if (!this.styleClip) return showInfo("Copy a style first");
+		await this.applyStyle(c, this.styleClip, "Pasted style");
+	}
+
+	// -----------------------------------------------------------------------
+	// Select similar
+	// -----------------------------------------------------------------------
+
+	selectSimilar(c: Ctx, by: "colour" | "fill" | "type" | "style") {
+		const cur = this.currentStop(c);
+		if (!cur) return showInfo("Select one shape first");
+		const lc = (v?: string) => (v ?? "").toLowerCase();
+		const key = (e: El): string => {
+			if (by === "colour") return lc(e.strokeColor);
+			if (by === "fill") return lc(e.backgroundColor);
+			if (by === "type") return e.type;
+			return [e.type === "text" ? "text" : "shape", lc(e.strokeColor), lc(e.backgroundColor), e.strokeWidth, e.strokeStyle, e.fillStyle, e.roughness].join("|");
+		};
+		if (by === "fill" && lc(cur.backgroundColor) === "transparent") return showInfo("This shape has no fill");
+		const want = key(cur);
+		const hits = c.all.filter((e) => !e.isDeleted && !e.locked && !(e.type === "text" && e.containerId) && key(e) === want);
+		selectIds(c, hits.map((e) => e.id));
+		showInfo(`Selected ${hits.length} with the same ${by}`);
+	}
+
+	// -----------------------------------------------------------------------
+	// Same size, grid, swap
+	// -----------------------------------------------------------------------
+
+	async sameSize(c: Ctx, mode: "width" | "height" | "both") {
+		const els = c.selected.filter((e) => e.type !== "text" && !LINEAR.includes(e.type));
+		if (els.length < 2) return showInfo("Select 2 or more shapes");
+		const w = Math.max(...els.map((e) => e.width));
+		const h = Math.max(...els.map((e) => e.height));
+		await this.editSmooth(c, els, (el) => {
+			if (mode !== "height") {
+				el.x -= (w - el.width) / 2;
+				el.width = w;
+			}
+			if (mode !== "width") {
+				el.y -= (h - el.height) / 2;
+				el.height = h;
+			}
+		});
+		showInfo(mode === "both" ? "Same size" : `Same ${mode}`);
+	}
+
+	/** Put the selection into neat rows and columns, in reading order. */
+	async tidyGrid(c: Ctx) {
+		const first = this.units(c);
+		const units = this.readingOrder(first.length >= 2 ? first : this.units(c, false));
+		if (units.length < 2) return showInfo("Select 2 or more shapes");
+		const cols = Math.ceil(Math.sqrt(units.length));
+		const cw = Math.max(...units.map((u) => u.box.x2 - u.box.x1));
+		const ch = Math.max(...units.map((u) => u.box.y2 - u.box.y1));
+		const gap = Math.max(20, this.settings.duplicateGap / 2);
+		const x0 = Math.min(...units.map((u) => u.box.x1));
+		const y0 = Math.min(...units.map((u) => u.box.y1));
+		const moves = new Map<string, { dx: number; dy: number }>();
+		units.forEach((u, i) => {
+			const cx = x0 + (i % cols) * (cw + gap) + cw / 2;
+			const cy = y0 + Math.floor(i / cols) * (ch + gap) + ch / 2;
+			const dx = cx - (u.box.x1 + u.box.x2) / 2;
+			const dy = cy - (u.box.y1 + u.box.y2) / 2;
+			if (Math.abs(dx) > 0.01 || Math.abs(dy) > 0.01) for (const e of u.els) moves.set(e.id, { dx, dy });
+		});
+		if (moves.size === 0) return showInfo("Already in a grid");
+		await this.applyMoves(c, moves);
+		showInfo(`Grid: ${cols} across`);
+	}
+
+	async swap(c: Ctx) {
+		let units = this.units(c);
+		if (units.length !== 2) units = this.units(c, false);
+		if (units.length !== 2) return showInfo("Select 2 shapes to swap");
+		const mid = (u: (typeof units)[number]) => ({ x: (u.box.x1 + u.box.x2) / 2, y: (u.box.y1 + u.box.y2) / 2 });
+		const [a, b] = units;
+		const ma = mid(a);
+		const mb = mid(b);
+		const moves = new Map<string, { dx: number; dy: number }>();
+		for (const e of a.els) moves.set(e.id, { dx: mb.x - ma.x, dy: mb.y - ma.y });
+		for (const e of b.els) moves.set(e.id, { dx: ma.x - mb.x, dy: ma.y - mb.y });
+		await this.applyMoves(c, moves);
+		showInfo("Swapped");
+	}
+
+	// -----------------------------------------------------------------------
+	// Turn, flip and lock
+	// -----------------------------------------------------------------------
+
+	/** Turn the selection around its middle. Positive is clockwise. */
+	async turn(c: Ctx, deg: number) {
+		const units = this.units(c);
+		if (units.length === 0) return showInfo("Select something first");
+		const O = {
+			x: (Math.min(...units.map((u) => u.box.x1)) + Math.max(...units.map((u) => u.box.x2))) / 2,
+			y: (Math.min(...units.map((u) => u.box.y1)) + Math.max(...units.map((u) => u.box.y2))) / 2,
+		};
+		const r = (deg * Math.PI) / 180;
+		const moves = new Map<string, { dx: number; dy: number; at?: (t: number) => { dx: number; dy: number } }>();
+		for (const e of units.flatMap((u) => u.els)) {
+			const p = this.centreOf(e);
+			const vx = p.x - O.x;
+			const vy = p.y - O.y;
+			// Along the circle, so it swings round instead of cutting across.
+			const at = (t: number) => ({ dx: O.x + vx * Math.cos(r * t) - vy * Math.sin(r * t) - p.x, dy: O.y + vx * Math.sin(r * t) + vy * Math.cos(r * t) - p.y });
+			moves.set(e.id, { ...at(1), at });
+		}
+		const full = Math.PI * 2;
+		await this.applyMoves(c, moves, (el, t) => (el.angle = ((((el.angle ?? 0) + r * t) % full) + full) % full));
+		showInfo(`Turned ${Math.abs(deg)}° ${deg > 0 ? "right" : "left"}`);
+	}
+
+	flip(c: Ctx, across: boolean) {
+		if (c.selected.length === 0) return showInfo("Select something first");
+		excalidrawKey(across ? "H" : "V", across ? "KeyH" : "KeyV", true);
+		showInfo(across ? "Flipped left to right" : "Flipped top to bottom");
+	}
+
+	async lock(c: Ctx) {
+		const els = withBoundText(c);
+		if (els.length === 0) return showInfo("Select something first");
+		await edit(c, els, (el) => (el.locked = true));
+		selectIds(c, []);
+		showInfo(`Locked ${this.units(c).length || els.length}. Unlock all to undo.`);
+	}
+
+	async unlockAll(c: Ctx) {
+		const els = c.all.filter((e) => e.locked && !e.isDeleted);
+		if (els.length === 0) return showInfo("Nothing is locked");
+		await edit(c, els, (el) => (el.locked = false));
+		selectIds(c, els.filter((e) => !(e.type === "text" && e.containerId)).map((e) => e.id));
+		showInfo(`Unlocked ${els.filter((e) => !(e.type === "text" && e.containerId)).length}`);
+	}
+
+	// -----------------------------------------------------------------------
+	// Link a shape to a note
+	// -----------------------------------------------------------------------
+
+	linkNote(c: Ctx) {
+		const els = this.mains(c);
+		if (els.length === 0) return showInfo("Select a shape first");
+		const ids = els.map((e) => e.id);
+		const hasLink = els.some((e) => !!e.link);
+		const from = this.app.workspace.getActiveFile()?.path ?? "";
+		new NotePickerModal(this.app, hasLink, (file) => {
+			window.setTimeout(() => {
+				const now = this.context();
+				if (!now) return;
+				const link = file ? `[[${this.app.metadataCache.fileToLinktext(file, from)}]]` : null;
+				void edit(now, now.all.filter((e) => ids.includes(e.id)), (el) => (el.link = link)).then(() =>
+					showInfo(file ? `Linked to ${file.basename}` : "Link removed"),
+				);
+			}, 50);
+		}).open();
+	}
+
+	// -----------------------------------------------------------------------
+	// Frames
+	// -----------------------------------------------------------------------
+
+	private frames(c: Ctx): El[] {
+		const fr = c.all.filter((e) => e.type === "frame" && !e.isDeleted).map((e) => ({ e, box: this.boxOf(e) }));
+		return this.readingOrder(fr).map((f) => f.e);
+	}
+
+	async wrapInFrame(c: Ctx) {
+		const units = this.units(c).filter((u) => !u.els.some((e) => e.type === "frame"));
+		if (units.length === 0) return showInfo("Select something first");
+		const members = units.flatMap((u) => u.els);
+		const ids = new Set(members.map((e) => e.id));
+		// An arrow between two of them goes in too.
+		for (const e of c.all) {
+			if (!e.isDeleted && e.startBinding && e.endBinding && ids.has(e.startBinding.elementId) && ids.has(e.endBinding.elementId)) {
+				members.push(e);
+				ids.add(e.id);
+			}
+		}
+		const pad = 30;
+		const b = members.map((e) => this.boxOf(e));
+		const x1 = Math.min(...b.map((v) => v.x1)) - pad;
+		const y1 = Math.min(...b.map((v) => v.y1)) - pad;
+		const x2 = Math.max(...b.map((v) => v.x2)) + pad;
+		const y2 = Math.max(...b.map((v) => v.y2)) + pad;
+		const ea = c.ea;
+		if (!ea.addFrame || !ea.addElementsToFrame) return showInfo("Update Excalidraw to use frames");
+		ea.copyViewElementsToEAforEditing(members);
+		const name = `Frame ${this.frames(c).length + 1}`;
+		const id = ea.addFrame(x1, y1, x2 - x1, y2 - y1, name);
+		ea.addElementsToFrame(id, [...ids]);
+		await commitEA(ea, [id]);
+		showInfo(`Made ${name}`);
+	}
+
+	goFrame(c: Ctx, dir: 1 | -1) {
+		const frames = this.frames(c);
+		if (frames.length === 0) return showInfo("No frames yet. Select shapes and wrap them in a frame.");
+		const cur = c.selected[0];
+		const curId = cur ? (cur.type === "frame" ? cur.id : cur.frameId) : null;
+		const i = frames.findIndex((f) => f.id === curId);
+		const next = frames[i < 0 ? (dir > 0 ? 0 : frames.length - 1) : (((i + dir) % frames.length) + frames.length) % frames.length];
+		selectIds(c, [next.id]);
+		c.ea.viewZoomToElements?.(true, [next]);
+		showInfo(`${next.name || "Frame"} (${frames.indexOf(next) + 1} of ${frames.length})`);
+	}
+
+	// -----------------------------------------------------------------------
+	// Stamps: save shapes, place them again with a key
+	// -----------------------------------------------------------------------
+
+	async saveStamp(c: Ctx) {
+		const units = this.units(c);
+		if (units.length === 0) return showInfo("Select the shapes to save first");
+		const members = units.flatMap((u) => u.els);
+		const ids = new Set(members.map((e) => e.id));
+		for (const e of c.all) {
+			if (!e.isDeleted && !ids.has(e.id) && e.startBinding && e.endBinding && ids.has(e.startBinding.elementId) && ids.has(e.endBinding.elementId)) {
+				members.push(e);
+				ids.add(e.id);
+			}
+		}
+		const b = members.map((e) => this.boxOf(e));
+		const x0 = Math.min(...b.map((v) => v.x1));
+		const y0 = Math.min(...b.map((v) => v.y1));
+		const els = members.map((e) => {
+			const copy = JSON.parse(JSON.stringify(e)) as El;
+			copy.x -= x0;
+			copy.y -= y0;
+			copy.frameId = null;
+			copy.locked = false;
+			return copy;
+		});
+		const text = els.find((e) => e.type === "text")?.text?.trim().split("\n")[0];
+		const name = text ? text.slice(0, 30) : `Stamp ${this.settings.stamps.length + 1}`;
+		this.settings.stamps.push({ name, els });
+		await this.saveSettings();
+		showInfo(`Saved stamp ${this.settings.stamps.length}: ${name}`);
+	}
+
+	/** Place a stamp at the mouse, or in the middle of the view when the mouse is away. */
+	dropStamp(c: Ctx, i: number) {
+		const stamp = this.settings.stamps[i];
+		if (!stamp) return showInfo(`Stamp ${i + 1} is empty. Select shapes and save a stamp first.`);
+		const api = c.ea.getExcalidrawAPI?.();
+		if (!api) return;
+		const st = api.getAppState();
+		const z = st.zoom.value;
+		const view = { x1: -st.scrollX, y1: -st.scrollY, x2: st.width / z - st.scrollX, y2: st.height / z - st.scrollY };
+		const p = c.ea.getViewLastPointerPosition?.();
+		const at = p && p.x > view.x1 && p.x < view.x2 && p.y > view.y1 && p.y < view.y2 ? p : { x: (view.x1 + view.x2) / 2, y: (view.y1 + view.y2) / 2 };
+		const w = Math.max(...stamp.els.map((e) => this.boxOf(e).x2));
+		const h = Math.max(...stamp.els.map((e) => this.boxOf(e).y2));
+		const ox = at.x - w / 2;
+		const oy = at.y - h / 2;
+		const idMap = new Map(stamp.els.map((e) => [e.id, newId()]));
+		const groupMap = new Map<string, string>();
+		const gid = (g: string): string => {
+			const have = groupMap.get(g);
+			if (have) return have;
+			const made = newId();
+			groupMap.set(g, made);
+			return made;
+		};
+		const bind = (b: { elementId: string } | null | undefined) => (b && idMap.has(b.elementId) ? { ...b, elementId: idMap.get(b.elementId) as string } : null);
+		const fresh = stamp.els.map((src) => {
+			const e = JSON.parse(JSON.stringify(src)) as El;
+			e.id = idMap.get(src.id) as string;
+			e.x += ox;
+			e.y += oy;
+			e.seed = newSeed();
+			e.version = 1;
+			e.versionNonce = newSeed();
+			e.index = null;
+			e.isDeleted = false;
+			e.groupIds = (e.groupIds ?? []).map(gid);
+			if (e.containerId) e.containerId = idMap.get(e.containerId) ?? null;
+			e.boundElements = (e.boundElements ?? []).filter((r) => idMap.has(r.id)).map((r) => ({ ...r, id: idMap.get(r.id) as string }));
+			if (e.startBinding !== undefined) e.startBinding = bind(e.startBinding);
+			if (e.endBinding !== undefined) e.endBinding = bind(e.endBinding);
+			return e;
+		});
+		const select = fresh.filter((e) => !(e.type === "text" && e.containerId)).map((e) => e.id);
+		api.updateScene({
+			elements: [...api.getSceneElementsIncludingDeleted(), ...fresh],
+			appState: { selectedElementIds: Object.fromEntries(select.map((id) => [id, true])) },
+			captureUpdate: "IMMEDIATELY",
+		});
+		showInfo(`Stamp: ${stamp.name}`);
+	}
+
+	pickStamp() {
+		if (this.settings.stamps.length === 0) return showInfo("No stamps yet. Select shapes and save a stamp first.");
+		new ListPickerModal(this.app, "Find a stamp", this.settings.stamps.map((s, i) => ({ label: s.name, hint: i < 9 ? `Leader J ${i + 1}` : "", value: i })), (i) => {
+			window.setTimeout(() => {
+				const c = this.context();
+				if (c) this.dropStamp(c, i);
+			}, 50);
+		}).open();
+	}
+
+	// -----------------------------------------------------------------------
+	// Recent colours
+	// -----------------------------------------------------------------------
+
+	private noteColours(s: Style) {
+		let changed = false;
+		for (const col of [s.stroke, s.fill]) {
+			if (!col || col === "transparent") continue;
+			const list = this.settings.recentColours;
+			if (list[0]?.toLowerCase() === col.toLowerCase()) continue;
+			this.settings.recentColours = [col, ...list.filter((x) => x.toLowerCase() !== col.toLowerCase())].slice(0, 6);
+			changed = true;
+		}
+		if (changed) {
+			void this.saveSettings();
+			this.updateBar();
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Macros: record keys once, play them back with one key
+	// -----------------------------------------------------------------------
+
+	private recording: MacroStep[] | null = null;
+	private playing = false;
+
+	private record(step: MacroStep) {
+		if (this.recording && !this.playing) this.recording.push(step);
+	}
+
+	stepLabel(step: MacroStep): string {
+		if (step.t === "style") return step.label;
+		if (step.t === "action") return shortName(this.actions.find((a) => a.id === step.id)?.name ?? step.id);
+		let node: LeaderNode | undefined = this.leaderTree();
+		const names: string[] = [];
+		for (const k of step.keys) {
+			node = [...(node?.children ?? new Map<string, LeaderNode>())].find(([key]) => key.toUpperCase() === k.toUpperCase())?.[1];
+			if (!node) break;
+			names.push(node.label);
+		}
+		return names.join(" › ") || step.keys.join(" ");
+	}
+
+	async toggleRecord() {
+		if (!this.recording) {
+			this.recording = [];
+			this.statusKey = "";
+			this.updateStatus();
+			return showInfo("Recording a macro. Do the steps, then stop.");
+		}
+		const steps = this.recording;
+		this.recording = null;
+		this.statusKey = "";
+		this.updateStatus();
+		if (steps.length === 0) return showInfo("Nothing recorded");
+		const i = this.settings.macros.findIndex((m) => !m);
+		if (i < 0) return showInfo("All 9 macros are full. Delete one in Settings.");
+		const name = steps.slice(0, 3).map((s) => this.stepLabel(s)).join(", ") + (steps.length > 3 ? ` and ${steps.length - 3} more` : "");
+		this.settings.macros[i] = { name, steps };
+		await this.saveSettings();
+		showInfo(`Saved macro ${i + 1}: ${name}`);
+	}
+
+	async playMacro(i: number) {
+		const m = this.settings.macros[i];
+		if (!m) return showInfo(`Macro ${i + 1} is empty. Record one first.`);
+		if (this.playing) return;
+		this.playing = true;
+		try {
+			for (const step of m.steps) {
+				const c = this.context();
+				if (!c) break;
+				if (step.t === "style") await this.tracked(c, () => this.applyStyle(c, step.style, step.label));
+				else if (step.t === "action") {
+					const a = this.actions.find((x) => x.id === step.id);
+					if (a && (!c.typing || a.whileTyping) && a.canRun(c)) await this.runAction(a, c);
+				} else {
+					let node: LeaderNode | undefined = this.leaderTree();
+					for (const k of step.keys) node = [...(node?.children ?? new Map<string, LeaderNode>())].find(([key]) => key.toUpperCase() === k.toUpperCase())?.[1];
+					const run = node?.run;
+					if (run) await this.tracked(c, () => run(c));
+				}
+				await sleepMs(60);
+			}
+		} finally {
+			this.playing = false;
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Share: presets, colours, stamps and macros in one file
+	// -----------------------------------------------------------------------
+
+	static SHARE_PATH = "Excalidraw Hotkeys presets.json";
+
+	async exportShare() {
+		const st = this.settings;
+		const data = { app: "excalidraw-hotkeys", version: 1, presets: st.presets, strokeColours: st.strokeColours, fillColours: st.fillColours, stamps: st.stamps, macros: st.macros, barCommands: st.barCommands };
+		const path = normalizePath(ExcalidrawHotkeys.SHARE_PATH);
+		const text = JSON.stringify(data, null, 2);
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (file instanceof TFile) await this.app.vault.modify(file, text);
+		else await this.app.vault.create(path, text);
+		new Notice(`Saved to ${path}. Copy it to another vault and press Import there.`);
+	}
+
+	importShare() {
+		const files = this.app.vault.getFiles().filter((f) => f.extension === "json");
+		if (files.length === 0) return new Notice(`No .json file in this vault. Put ${ExcalidrawHotkeys.SHARE_PATH} in it first.`);
+		new ListPickerModal(this.app, "Find the presets file", files.map((f) => ({ label: f.path, hint: "", value: f })), (f) => void this.importFrom(f)).open();
+	}
+
+	private async importFrom(file: TFile) {
+		let d: Partial<HotkeySettings> & { app?: string };
+		try {
+			d = JSON.parse(await this.app.vault.read(file)) as Partial<HotkeySettings> & { app?: string };
+		} catch {
+			new Notice("This file is not a presets file");
+			return;
+		}
+		if (d.app !== "excalidraw-hotkeys") {
+			new Notice("This file is not a presets file");
+			return;
+		}
+		const st = this.settings;
+		const isColours = (v: unknown): v is string[] => Array.isArray(v) && v.length === 8 && v.every((x) => typeof x === "string");
+		if (Array.isArray(d.presets)) st.presets = Array.from({ length: 9 }, (_, i) => d.presets?.[i] ?? null);
+		if (isColours(d.strokeColours)) st.strokeColours = [...d.strokeColours];
+		if (isColours(d.fillColours)) st.fillColours = [...d.fillColours];
+		const names = new Set(st.stamps.map((s) => s.name));
+		const newStamps = (d.stamps ?? []).filter((s) => s && Array.isArray(s.els) && !names.has(s.name));
+		st.stamps.push(...newStamps);
+		let macros = 0;
+		for (const m of d.macros ?? []) {
+			const i = st.macros.findIndex((x) => !x);
+			if (!m || i < 0 || st.macros.some((x) => x?.name === m.name)) continue;
+			st.macros[i] = m;
+			macros++;
+		}
+		for (const id of d.barCommands ?? []) if (!st.barCommands.includes(id)) st.barCommands.push(id);
+		await this.saveSettings();
+		this.barKey = "";
+		this.updateBar();
+		new Notice(`Imported presets and colours, ${newStamps.length} stamps and ${macros} macros`);
 	}
 
 	// -----------------------------------------------------------------------
@@ -1593,34 +2861,43 @@ export default class ExcalidrawHotkeys extends Plugin {
 	updateBar() {
 		const view = this.app.workspace.getActiveViewOfType(ItemView);
 		const on = this.settings.presetBar && view?.getViewType() === "excalidraw";
-		// Inside the drawing, so the bar takes the drawing's own light or dark colours.
-		const host = on ? (view?.contentEl.querySelector<HTMLElement>(".excalidraw") ?? null) : null;
-		const key = host ? `${this.settings.presets.map((p) => (p ? `${p.name}|${p.style.stroke}|${p.style.fill}` : "")).join(";")}` : "";
+		// One more island in Excalidraw's own bottom row, so it looks and sits like the zoom and undo buttons.
+		// Without that row, it floats at the bottom of the drawing.
+		const root = on ? (view?.contentEl.querySelector<HTMLElement>(".excalidraw") ?? null) : null;
+		const row = root?.querySelector<HTMLElement>(".App-bottom-bar") ?? root?.querySelector<HTMLElement>(".layer-ui__wrapper__footer-left .Stack_horizontal") ?? null;
+		const host = row ?? root;
+		const st = this.settings;
+		const key = host ? `${st.presets.map((p) => (p ? `${p.name}|${p.style.stroke}|${p.style.fill}` : "")).join(";")}#${st.recentColours.join(",")}#${st.barCommands.join(",")}` : "";
 		if (host && this.barEl?.parentElement === host && key === this.barKey) return;
 		this.barEl?.remove();
 		this.barEl = null;
 		this.barKey = key;
 		if (!host) return;
-		const bar = host.createDiv({ cls: "ekh-preset-bar" });
+		const bar = host.createDiv({ cls: `Island ekh-preset-bar ${row ? "is-docked" : "is-floating"}` });
 		// Keep the drawing's focus and selection when the bar is tapped.
 		bar.addEventListener("pointerdown", (e) => e.preventDefault());
+		// The island stays still; this strip inside it scrolls when there is more than fits.
+		const strip = bar.createDiv({ cls: "ekh-bar-scroll" });
 		bar.addEventListener("mousedown", (e) => e.preventDefault());
 		this.settings.presets.forEach((p, i) => {
 			if (!p) return;
-			const b = bar.createEl("button", { cls: "ekh-preset", attr: { "aria-label": `${p.name}\nClick: use. Right-click: save over it.`, "data-tooltip-position": "top" } });
+			const b = strip.createEl("button", { cls: "ekh-preset", attr: { "aria-label": `Preset ${i + 1}: ${p.name}\nClick: use. Right-click: save over it.`, "data-tooltip-position": "top" } });
 			const sw = b.createSpan({ cls: "ekh-swatch" });
 			const stroke = p.style.stroke;
 			if (stroke === undefined || stroke === "transparent") sw.addClass("is-none");
 			else sw.setCssProps({ "--ekh-swatch": stroke });
 			if (p.style.fill && p.style.fill !== "transparent") sw.setCssProps({ "--ekh-swatch-fill": p.style.fill });
-			b.createSpan({ cls: "ekh-preset-num", text: String(i + 1) });
-			b.addEventListener("click", () => this.fromBar((c) => this.usePreset(c, i)));
+			b.addEventListener("click", () => {
+				this.record({ t: "action", id: `preset-${i + 1}` });
+				this.fromBar((c) => this.usePreset(c, i));
+			});
 			b.addEventListener("contextmenu", (e) => {
 				e.preventDefault();
 				this.fromBar((c) => this.savePreset(c, i));
 			});
 		});
-		const add = bar.createEl("button", { cls: "ekh-preset ekh-preset-add", text: "+", attr: { "aria-label": "Save the pen, or the selected shape's style, as a new preset", "data-tooltip-position": "top" } });
+		const add = strip.createEl("button", { cls: "ekh-preset ekh-preset-add", attr: { "aria-label": "Save the pen, or the selected shape's style, as a new preset", "data-tooltip-position": "top" } });
+		setIcon(add, "plus");
 		add.addEventListener("click", () =>
 			this.fromBar((c) => {
 				const i = this.settings.presets.findIndex((p) => !p);
@@ -1628,13 +2905,83 @@ export default class ExcalidrawHotkeys extends Plugin {
 				return this.savePreset(c, i);
 			}),
 		);
+		// The last colours you used. Click: pen colour. Right-click: fill.
+		if (st.recentColours.length) {
+			strip.createDiv({ cls: "ekh-bar-sep" });
+			for (const col of st.recentColours.slice(0, 5)) {
+				const b = strip.createEl("button", { cls: "ekh-preset ekh-recent", attr: { "aria-label": `${hueName(col)} ${col}\nClick: pen colour. Right-click: fill.`, "data-tooltip-position": "top" } });
+				b.createSpan({ cls: "ekh-swatch" }).setCssProps({ "--ekh-swatch": col, "--ekh-swatch-fill": col });
+				const use = (s: Style, label: string) => {
+					this.record({ t: "style", style: s, label });
+					this.fromBar((c) => this.applyStyle(c, s, label));
+				};
+				b.addEventListener("click", () => use({ stroke: col }, `${hueName(col)} pen`));
+				b.addEventListener("contextmenu", (e) => {
+					e.preventDefault();
+					use({ fill: col }, `${hueName(col)} fill`);
+				});
+			}
+		}
+		// Your own buttons: any command.
+		const cmds = (this.app as AppInternals).commands;
+		const own = st.barCommands.filter((id) => cmds?.commands?.[id]);
+		if (own.length) {
+			strip.createDiv({ cls: "ekh-bar-sep" });
+			for (const id of own) {
+				const name = this.commandName(id).replace(/^Excalidraw Hotkeys: /, "");
+				const b = strip.createEl("button", { cls: "ekh-preset ekh-bar-cmd", text: shortName(name), attr: { "aria-label": name, "data-tooltip-position": "top" } });
+				// This plugin's commands record themselves in a macro when they run.
+				b.addEventListener("click", () => cmds?.executeCommandById(id));
+			}
+		}
+		strip.addEventListener("scroll", () => this.fitBar());
+		// A mouse wheel scrolls the bar sideways when it has more than fits.
+		strip.addEventListener("wheel", (e) => {
+			if (strip.scrollWidth <= strip.clientWidth) return;
+			e.preventDefault();
+			strip.scrollLeft += e.deltaY + e.deltaX;
+		}, { passive: false });
 		this.barEl = bar;
+		this.fitBar();
+	}
+
+	/**
+	 * Keep the bar clear of Obsidian's status bar and the drawing's right edge.
+	 * When it has more than fits, it scrolls sideways and fades at the edge.
+	 */
+fitBar() {
+		const bar = this.barEl;
+		if (!bar?.isConnected) return;
+		const view = bar.closest(".excalidraw")?.getBoundingClientRect();
+		const strip = bar.querySelector<HTMLElement>(".ekh-bar-scroll");
+		if (!view || !strip) return;
+		// Where the bar starts in Excalidraw's row: just after the last island before it.
+		const prev = bar.previousElementSibling?.getBoundingClientRect();
+		const row = bar.parentElement?.getBoundingClientRect();
+		const left = bar.hasClass("is-docked") && prev ? prev.right + 4 : bar.getBoundingClientRect().left;
+		const top = row && bar.hasClass("is-docked") ? row.bottom - 40 : bar.getBoundingClientRect().top;
+		let right = view.right - 8;
+		const sr = bar.doc.body.querySelector<HTMLElement>(".status-bar")?.getBoundingClientRect();
+		// Obsidian's status bar floats over the bottom right of the drawing: stop before it.
+		if (sr && sr.width > 0 && sr.top < top + 40 && sr.bottom > top) right = Math.min(right, sr.left - 8);
+		const need = strip.scrollWidth + 8;
+		const room = right - left;
+		// No room beside the row: sit just above it instead, in the same style.
+		const lift = bar.hasClass("is-docked") && room < Math.min(need, 160);
+		bar.toggleClass("is-lifted", lift);
+		const max = lift && row ? view.right - row.left - 8 : room;
+		const want = `${Math.max(80, Math.floor(max))}px`;
+		if (bar.style.getPropertyValue("--ekh-bar-max") !== want) bar.setCssProps({ "--ekh-bar-max": want });
+		bar.toggleClass("is-clipped", strip.scrollWidth > strip.clientWidth + 1 && strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 1);
 	}
 
 	private fromBar(fn: (c: Ctx) => unknown) {
-		const c = this.context();
-		if (!c) return;
-		void this.tracked(c, () => fn(c)).then(() => this.updateBar());
+		void this.settle().then(async () => {
+			const c = this.context();
+			if (!c) return;
+			await this.tracked(c, () => fn(c));
+			this.updateBar();
+		});
 	}
 
 	/** The tool command whose letter this key is, if any. */
@@ -1683,6 +3030,11 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 		e.preventDefault();
 		e.stopImmediatePropagation();
+		// A glide is running: finish it, and skip this one step so nothing reads a half-way place.
+		if (this.gliding) {
+			void this.settle();
+			return true;
+		}
 		const d = e.shiftKey ? this.settings.nudgeStepShift : this.settings.nudgeStep;
 		let dx = 0;
 		let dy = 0;
@@ -2137,7 +3489,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 			keys: [hk(["Alt"], "B")],
 			canRun: (c) => withText(c).length > 0,
 			run: (c) =>
-				edit(c, withText(c), (el) => {
+				this.editSmooth(c, withText(c), (el) => {
 					const t = c.all.find((x) => x.type === "text" && x.containerId === el.id);
 					if (!t) return;
 					const w = t.width + s().fitPadding;
@@ -2163,18 +3515,6 @@ export default class ExcalidrawHotkeys extends Plugin {
 					(BOXES.includes(el.type) || el.type === "text") &&
 					!(el.type === "text" && el.containerId && c.selected.some((x) => x.id === el.containerId)),
 			);
-		const cloneEl = (el: El, ox: number, oy: number): El => {
-			const copy = JSON.parse(JSON.stringify(el)) as El;
-			copy.id = newId();
-			copy.seed = newSeed();
-			copy.versionNonce = newSeed();
-			copy.version = 1;
-			copy.x += ox;
-			copy.y += oy;
-			copy.boundElements = [];
-			copy.groupIds = [];
-			return copy;
-		};
 		for (const [name, key, dx, dy] of dirs) {
 			list.push({
 				id: `duplicate-${name}`,
@@ -2205,34 +3545,9 @@ export default class ExcalidrawHotkeys extends Plugin {
 							copy.boundElements = [{ type: "text", id: t.id }];
 						}
 
-						Object.assign(ea.style, {
-							strokeColor: el.strokeColor,
-							strokeWidth: 1,
-							roughness: el.roughness ?? ea.style.roughness,
-						});
-						ea.connectObjects(el.id, null, copy.id, null, {
-							startArrowHead: null,
-							endArrowHead: "arrow",
-							numberOfPoints: 0,
-						});
+						this.niceArrow(c, el, copy, dx !== 0 ? "wide" : "tall");
 					}
-					// One scene update with the copies, arrows and new selection, so one
-					// Ctrl+Z removes the whole duplicate.
-					const api = ea.getExcalidrawAPI?.();
-					if (!api) {
-						await ea.addElementsToView(false, true);
-						return;
-					}
-					const changed = new Map<string, El>(ea.getElements().map((x: El) => [x.id, x]));
-					const merged = api.getSceneElementsIncludingDeleted().map((x: El) => {
-						const n = changed.get(x.id);
-						if (!n) return x;
-						changed.delete(x.id);
-						return { ...n, version: (x.version ?? 1) + 1, versionNonce: newSeed() };
-					});
-					merged.push(...changed.values());
-					const selectedElementIds = Object.fromEntries(newIds.map((id) => [id, true]));
-					api.updateScene({ elements: merged, appState: { selectedElementIds }, captureUpdate: "IMMEDIATELY" });
+					await commitEA(ea, newIds);
 				},
 			});
 		}
@@ -2252,7 +3567,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				keys: [hk(mods, "C")],
 				canRun: (c) => resizable(c).length > 0,
 				run: (c) =>
-					edit(c, resizable(c), (el) => {
+					this.editSmooth(c, resizable(c), (el) => {
 						const w = el.width * factor(grow);
 						el.x -= (w - el.width) / 2;
 						el.width = w;
@@ -2265,7 +3580,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				keys: [hk(mods, "V")],
 				canRun: (c) => resizable(c).length > 0,
 				run: (c) =>
-					edit(c, resizable(c), (el) => {
+					this.editSmooth(c, resizable(c), (el) => {
 						const h = el.height * factor(grow);
 						el.y -= (h - el.height) / 2;
 						el.height = h;
@@ -2295,7 +3610,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 					}
 					const rest = c.selected.filter((el) => el.type !== "text");
 					if (rest.length === 0) return;
-					await edit(c, rest, (el) => {
+					await this.editSmooth(c, rest, (el) => {
 						if (LINEAR.includes(el.type)) {
 							el.strokeWidth = Math.max(1, (el.strokeWidth ?? 1) + (grow ? 1 : -1));
 						} else {
@@ -2435,6 +3750,94 @@ export default class ExcalidrawHotkeys extends Plugin {
 		for (const [id, name, mode] of arrange) {
 			list.push({ id, name, group: "Arrange", canRun: hasSelection, run: (c) => this.arrange(c, mode) });
 		}
+		// These say what to select when the selection does not fit, so they always run.
+		const add = (id: string, name: string, group: string, run: (c: Ctx) => unknown, keys?: Hotkey[], extra: Partial<Action> = {}) =>
+			list.push({ id, name, group, keys, canRun: always, run: async (c) => void (await run(c)), ...extra });
+		add("same-width", "Same width", "Arrange", (c) => this.sameSize(c, "width"));
+		add("same-height", "Same height", "Arrange", (c) => this.sameSize(c, "height"));
+		add("same-size", "Same width and height", "Arrange", (c) => this.sameSize(c, "both"));
+		add("tidy-grid", "Tidy into a grid", "Arrange", (c) => this.tidyGrid(c));
+		add("swap", "Swap two shapes", "Arrange", (c) => this.swap(c));
+
+		// Shapes -----------------------------------------------------------------------
+		const sketchable = (c: Ctx) => c.selected.filter((el) => el.type !== "text" && el.type !== "image");
+		const cornered = (c: Ctx) => c.selected.filter((el) => el.type === "rectangle" || el.type === "diamond");
+		pens["cycle-sketch"] = (c, dir) => {
+			const v = penCycle(c, "currentItemRoughness", SKETCH.map((k) => k[1]), dir, 1);
+			penSet(c, { currentItemRoughness: v }, SKETCH.find((k) => k[1] === v)?.[0] ?? String(v));
+		};
+		cycle("cycle-sketch", "Cycle sketchiness (clean, sketchy, very sketchy)", "Shapes", "S", (c) => sketchable(c).length > 0, (c, dir) => {
+			const els = sketchable(c);
+			const order = SKETCH.map((k) => k[1]);
+			const next = order[wrap(Math.max(0, order.indexOf(els[0].roughness ?? 1)) + dir, order.length)];
+			showInfo(SKETCH.find((k) => k[1] === next)?.[0] ?? "");
+			return edit(c, els, (el) => (el.roughness = next));
+		});
+		list.push({
+			id: "toggle-corners",
+			name: "Round or sharp corners",
+			group: "Shapes",
+			keys: [hk(["Mod", "Alt"], "R")],
+			canRun: (c) => c.selected.length === 0 || cornered(c).length > 0,
+			run: (c) => {
+				if (c.selected.length === 0) {
+					const round = penGet(c, "currentItemRoundness") !== "sharp";
+					return penSet(c, { currentItemRoundness: round ? "sharp" : "round" }, round ? "sharp corners" : "round corners");
+				}
+				const els = cornered(c);
+				const round = !els[0].roundness;
+				showInfo(round ? "Round corners" : "Sharp corners");
+				return edit(c, els, (el) => (el.roundness = round ? { type: el.type === "rectangle" ? 3 : 2 } : null));
+			},
+		});
+		add("cycle-shape", "Change shape (box, circle, diamond)", "Shapes", (c) => this.setShape(c, null));
+		for (const [type, name] of [["rectangle", "box"], ["ellipse", "circle"], ["diamond", "diamond"]]) {
+			add(`shape-${name}`, `Change shape to ${name}`, "Shapes", (c) => this.setShape(c, type), undefined, { oneByOne: true });
+		}
+		pens["cycle-arrow-type"] = (c, dir) => {
+			const v = penCycle(c, "currentItemArrowType", ARROW_TYPES.map((t) => t[1]), dir, "round");
+			penSet(c, { currentItemArrowType: v }, `${ARROW_TYPES.find((t) => t[1] === v)?.[0] ?? v} arrows`);
+		};
+		cycle("cycle-arrow-type", "Cycle arrow shape (straight, curved, elbow)", "Lines", "W", (c) => arrows(c).length > 0, (c, dir) => {
+			const els = arrows(c);
+			const now = els[0].elbowed ? "elbow" : els[0].roundness ? "round" : "sharp";
+			const order = ARROW_TYPES.map((t) => t[1]);
+			const next = order[wrap(order.indexOf(now) + dir, order.length)];
+			showInfo(`${ARROW_TYPES.find((t) => t[1] === next)?.[0] ?? next} arrow`);
+			return edit(c, els, (el) => setArrowType(el, next));
+		});
+
+		// Mind map and connect --------------------------------------------------------------
+		add("mind-child", "New connected box (mind map)", "Mind map", (c) => this.grow(c, false));
+		add("mind-sibling", "New box beside (mind map)", "Mind map", (c) => this.grow(c, true));
+		add("connect", "Connect the selected shapes with arrows", "Mind map", (c) => this.connect(c), [hk(["Mod", "Alt"], "A")]);
+
+		// Style clipboard and select similar ------------------------------------------------
+		add("copy-style", "Copy style", "Style", (c) => this.copyStyle(c), [hk(["Mod", "Alt"], "C")]);
+		add("paste-style", "Paste style", "Style", (c) => this.pasteStyle(c), [hk(["Mod", "Alt"], "V")]);
+		for (const [by, name] of [["colour", "pen colour"], ["fill", "fill"], ["type", "type"], ["style", "style"]] as const) {
+			add(`select-same-${by}`, `Select all with the same ${name}`, "Select", (c) => this.selectSimilar(c, by));
+		}
+
+		// Turn, flip, lock --------------------------------------------------------------------
+		add("turn-right", "Turn right 90°", "Turn", (c) => this.turn(c, 90));
+		add("turn-left", "Turn left 90°", "Turn", (c) => this.turn(c, -90));
+		add("turn-right-small", "Turn right 15°", "Turn", (c) => this.turn(c, 15));
+		add("turn-left-small", "Turn left 15°", "Turn", (c) => this.turn(c, -15));
+		add("flip-across", "Flip left to right", "Turn", (c) => this.flip(c, true));
+		add("flip-down", "Flip top to bottom", "Turn", (c) => this.flip(c, false));
+		add("lock", "Lock the selection", "Turn", (c) => this.lock(c));
+		add("unlock-all", "Unlock all", "Turn", (c) => this.unlockAll(c));
+
+		// Links, frames, stamps, macros ---------------------------------------------------------
+		add("link-note", "Link the selection to a note", "Link", (c) => this.linkNote(c));
+		add("wrap-frame", "Put the selection in a frame", "Frames", (c) => this.wrapInFrame(c));
+		add("next-frame", "Go to the next frame", "Frames", (c) => this.goFrame(c, 1));
+		add("previous-frame", "Go to the previous frame", "Frames", (c) => this.goFrame(c, -1));
+		add("save-stamp", "Save the selection as a stamp", "Stamps", (c) => this.saveStamp(c));
+		add("drop-stamp", "Place a stamp", "Stamps", () => this.pickStamp());
+		add("record-macro", "Record a macro (run again to stop)", "Macros", () => this.toggleRecord());
+		for (let i = 0; i < 9; i++) add(`play-macro-${i + 1}`, `Play macro ${i + 1}`, "Macros", () => this.playMacro(i));
 
 		return list;
 	}
@@ -2557,7 +3960,7 @@ class HotkeyListModal extends Modal {
 // Settings tab
 // ---------------------------------------------------------------------------
 
-type NumberKey = "whichKeyDelay" | "nudgeStep" | "nudgeStepShift" | "resizePercent" | "duplicateGap" | "fitPadding" | "zoomMs";
+type NumberKey = "moveMs" | "whichKeyDelay" | "nudgeStep" | "nudgeStepShift" | "resizePercent" | "duplicateGap" | "fitPadding" | "zoomMs";
 type ToggleKey = "presetBar" | "whichKey" | "catchKeysFirst" | "showStatusColours" | "showOneByOne" | "shiftGoesBack" | "diagonalNudge" | "copyText" | "copyFill" | "zoomOnSelection";
 
 function parseZoomPresets(v: string): number[] {
@@ -2591,6 +3994,11 @@ class HotkeySettingTab extends PluginSettingTab {
 			{
 				type: "group",
 				items: [
+					{
+						name: "Guide",
+						desc: "How to use it all, with your own keys. Also: leader key, then ?.",
+						action: () => new GuideModal(this.app, this.plugin).open(),
+					},
 					{
 						name: "Show my hotkeys",
 						desc: "See the key for every command.",
@@ -2668,25 +4076,27 @@ class HotkeySettingTab extends PluginSettingTab {
 								],
 							},
 							...([
-								["Tools", "Tools"],
-								["Move between shapes", "Move"],
-								["Repeat", "Repeat"],
-								["Leader key", "Leader"],
-							] as const).map(
-								([heading, group]): SettingDefinitionItem => ({
+								["Tools", ["Tools"]],
+								["Move between shapes", ["Move"]],
+								["Mind map and shapes", ["mind-child", "mind-sibling", "connect", "cycle-shape"]],
+								["Repeat", ["Repeat"]],
+								["Leader key", ["Leader"]],
+							] as [string, string[]][]).map(
+								([heading, groups]): SettingDefinitionItem => ({
 									type: "group",
 									heading,
 									items: this.plugin.actions
-										.filter((a) => a.group === group && a.id !== "search")
+										.filter((a) => (groups.includes(a.group) || groups.includes(a.id)) && a.id !== "search")
 										.map(
 											(a): SettingDefinition => ({
 												name: a.name.replace(/^Tool: /, ""),
 												desc:
-													a.id === "delete"
-														? "Only with something selected."
-														: a.id === "leader"
-															? "Press it, then a short row of keys. A panel shows the choices."
-															: "",
+													({
+														delete: "Only with something selected.",
+														leader: "Press it, then a short row of keys. A panel shows the choices.",
+														"mind-child": "Adds a box with an arrow from the selected box. Type its label at once.",
+														"mind-sibling": "Adds a box next to the selected one, from the same parent.",
+													} as Record<string, string>)[a.id] ?? "",
 												aliases: ["tool", "letter", "key", "drawing"],
 												render: (setting) => this.renderToolKey(setting, a),
 											}),
@@ -2847,6 +4257,140 @@ class HotkeySettingTab extends PluginSettingTab {
 									}),
 								),
 							},
+							{
+								type: "group",
+								heading: "Your buttons on the bar",
+								items: [
+									{
+										name: "Add a button",
+										desc: "Put any command on the preset bar. Good for a tablet with no keyboard.",
+										action: () =>
+											new CommandPickerModal(this.app, this.plugin, (id) => {
+												if (!this.plugin.settings.barCommands.includes(id)) this.plugin.settings.barCommands.push(id);
+												void this.plugin.saveSettings().then(() => {
+													this.plugin.updateBar();
+													this.update();
+												});
+											}).open(),
+									},
+									...this.plugin.settings.barCommands.map(
+										(id, i): SettingDefinition => ({
+											name: this.plugin.commandName(id),
+											desc: "",
+											aliases: ["bar", "button", "toolbar"],
+											render: (setting) => {
+												setting.addExtraButton((b) =>
+													b
+														.setIcon("x")
+														.setTooltip("Remove")
+														.onClick(() => {
+															this.plugin.settings.barCommands.splice(i, 1);
+															void this.plugin.saveSettings().then(() => {
+																this.plugin.updateBar();
+																this.update();
+															});
+														}),
+												);
+											},
+										}),
+									),
+								],
+							},
+							{
+								type: "group",
+								heading: "Share",
+								items: [
+									{
+										name: "Export",
+										desc: `Save your presets, colours, stamps, macros and bar buttons to ${ExcalidrawHotkeys.SHARE_PATH}.`,
+										action: () => void this.plugin.exportShare(),
+									},
+									{
+										name: "Import",
+										desc: "Load them from that file in this vault. Presets and colours are replaced. Stamps, macros and buttons are added.",
+										action: () => {
+											this.plugin.importShare();
+										},
+									},
+								],
+							},
+						],
+					},
+					{
+						type: "page",
+						name: "Stamps and macros",
+						desc: "Saved shapes to place again, and recorded steps to play again.",
+						displayValue: () => `${this.plugin.settings.stamps.length} stamps, ${this.plugin.settings.macros.filter(Boolean).length} macros`,
+						items: [
+							{
+								type: "group",
+								heading: "Stamps",
+								items: [
+									{
+										name: "Save a stamp",
+										desc: "In a drawing, select shapes, then press the leader key, J and S. Place it with the leader key, J and its number. It lands at the mouse.",
+									},
+									...this.plugin.settings.stamps.map(
+										(s, i): SettingDefinition => ({
+											name: `Stamp ${i + 1}`,
+											desc: `${s.els.filter((e) => !(e.type === "text" && e.containerId)).length} shapes`,
+											aliases: ["stamp", "template", "snippet"],
+											render: (setting) => {
+												setting.addText((t) =>
+													t.setValue(s.name).onChange((v) => {
+														s.name = v.trim() || `Stamp ${i + 1}`;
+														void this.plugin.saveSettings();
+													}),
+												);
+												setting.addExtraButton((b) =>
+													b
+														.setIcon("x")
+														.setTooltip("Delete stamp")
+														.onClick(() => {
+															this.plugin.settings.stamps.splice(i, 1);
+															void this.plugin.saveSettings().then(() => this.update());
+														}),
+												);
+											},
+										}),
+									),
+								],
+							},
+							{
+								type: "group",
+								heading: "Macros",
+								items: [
+									{
+										name: "Record a macro",
+										desc: "In a drawing, press the leader key, Q and R. Do the steps. Press the leader key, Q and R again to stop. Play it with the leader key, Q and its number.",
+									},
+									...this.plugin.settings.macros.map(
+										(m, i): SettingDefinition => ({
+											name: `Macro ${i + 1}`,
+											desc: m ? m.steps.map((s) => this.plugin.stepLabel(s)).join(" › ") : "Empty",
+											aliases: ["macro", "record", "playback"],
+											render: (setting) => {
+												if (!m) return;
+												setting.addText((t) =>
+													t.setValue(m.name).onChange((v) => {
+														m.name = v.trim() || `Macro ${i + 1}`;
+														void this.plugin.saveSettings();
+													}),
+												);
+												setting.addExtraButton((b) =>
+													b
+														.setIcon("x")
+														.setTooltip("Delete macro")
+														.onClick(() => {
+															this.plugin.settings.macros[i] = null;
+															void this.plugin.saveSettings().then(() => this.update());
+														}),
+												);
+											},
+										}),
+									),
+								],
+							},
 						],
 					},
 					{
@@ -2908,7 +4452,7 @@ class HotkeySettingTab extends PluginSettingTab {
 					{
 						type: "page",
 						name: "Moving and sizing",
-						desc: "Diagonal move, resize step and fit padding.",
+						desc: "Diagonal move, resize step, arrow style and move speed.",
 						items: [
 							{
 								type: "group",
@@ -2918,6 +4462,12 @@ class HotkeySettingTab extends PluginSettingTab {
 									slider("Diagonal step with Shift", "Pixels per key press with Shift held.", "nudgeStepShift", 1, 100),
 									slider("Resize step", "Percent per key press.", "resizePercent", 1, 50),
 									slider("Fit padding", "Space around the text after Fit box to text.", "fitPadding", 0, 100),
+									{
+										name: "Arrow style",
+										desc: "How the arrows this plugin draws look: mind map, connect and duplicate. They are drawn again the same way when a shape moves.",
+										control: { type: "dropdown", key: "arrowStyle", options: { curved: "Curved, like a hand-drawn map", straight: "Straight", elbow: "Elbow, with right-angle bends", pen: "Like my pen" } },
+									},
+									slider("Move speed", "Milliseconds for line up, spread, grid, swap and turn to glide into place. 0 jumps.", "moveMs", 0, 600, 20),
 								],
 							},
 						],
@@ -3048,6 +4598,8 @@ class HotkeySettingTab extends PluginSettingTab {
 			const nums = parseZoomPresets(String(value));
 			if (nums.length === 0) return;
 			st.zoomPresets = nums;
+		} else if (key === "arrowStyle") {
+			st.arrowStyle = String(value);
 		} else if (key === "notePath") {
 			st.notePath = String(value).trim() || DEFAULT_SETTINGS.notePath;
 		} else if (typeof value === "number") {
@@ -3081,6 +4633,7 @@ class WelcomeModal extends Modal {
 		yes.addEventListener("click", () => {
 			void this.plugin.applySuggestedKeys().then((n) => new Notice(`Set ${n} keys`));
 			this.close();
+			new GuideModal(this.app, this.plugin).open();
 		});
 		no.addEventListener("click", () => this.close());
 	}
@@ -3157,5 +4710,268 @@ class CommandPickerModal extends SuggestModal<{ id: string; name: string }> {
 
 	onChooseSuggestion(it: { id: string; name: string }) {
 		this.pick(it.id);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pick a note to link, with the smart search
+// ---------------------------------------------------------------------------
+
+class NotePickerModal extends SuggestModal<TFile | null> {
+	constructor(
+		app: App,
+		private canRemove: boolean,
+		private pick: (file: TFile | null) => void,
+	) {
+		super(app);
+		this.setPlaceholder("Find a note to link");
+		this.limit = 60;
+	}
+
+	getSuggestions(query: string): (TFile | null)[] {
+		const files = this.app.vault.getMarkdownFiles();
+		const recent = this.app.workspace.getLastOpenFiles();
+		const sorted = [...files].sort((a, b) => {
+			const ra = recent.indexOf(a.path);
+			const rb = recent.indexOf(b.path);
+			return (ra < 0 ? 999 : ra) - (rb < 0 ? 999 : rb) || b.stat.mtime - a.stat.mtime;
+		});
+		const found = query.trim() ? rank(query, sorted, (f) => words(f.path.replace(/\.md$/, "")), (f) => f.basename) : sorted;
+		return this.canRemove && !query.trim() ? [null, ...found] : found;
+	}
+
+	renderSuggestion(f: TFile | null, el: HTMLElement) {
+		if (!f) {
+			el.createDiv({ text: "Remove the link" });
+			return;
+		}
+		el.addClass("ekh-suggestion");
+		el.createDiv({ cls: "ekh-suggestion-main", text: f.basename });
+		if (f.parent && f.parent.path !== "/") el.createDiv({ cls: "ekh-suggestion-hint", text: f.parent.path });
+	}
+
+	onChooseSuggestion(f: TFile | null) {
+		this.pick(f);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pick one thing from a short list, with the smart search
+// ---------------------------------------------------------------------------
+
+class ListPickerModal<T> extends SuggestModal<{ label: string; hint: string; value: T }> {
+	constructor(
+		app: App,
+		placeholder: string,
+		private items: { label: string; hint: string; value: T }[],
+		private pick: (value: T) => void,
+	) {
+		super(app);
+		this.setPlaceholder(placeholder);
+	}
+
+	getSuggestions(query: string): { label: string; hint: string; value: T }[] {
+		return query.trim() ? rank(query, this.items, (i) => words(i.label), (i) => i.label) : this.items;
+	}
+
+	renderSuggestion(it: { label: string; hint: string; value: T }, el: HTMLElement) {
+		el.addClass("ekh-suggestion");
+		el.createDiv({ cls: "ekh-suggestion-main", text: it.label });
+		if (it.hint) el.createDiv({ cls: "ekh-suggestion-hint", text: it.hint });
+	}
+
+	onChooseSuggestion(it: { label: string; hint: string; value: T }) {
+		this.pick(it.value);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Guide: how to use it, built from your own keys so it is never out of date
+// ---------------------------------------------------------------------------
+
+/**
+ * The guide as Markdown, from the same keys and menus the guide window shows.
+ * Saved as a note from the guide, and used to make docs/guide.md for GitHub.
+ */
+function guideMarkdown(p: ExcalidrawHotkeys): string {
+	const keys = (id: string) => {
+		const tool = p.settings.toolKeys[id];
+		const all = [...(tool ? [comboLabel(tool)] : []), ...p.hotkeysFor(id).map(hotkeyLabel)];
+		return all.length ? all.map((k) => `\`${k}\``).join(" or ") : "no key yet";
+	};
+	const code = (k: string) => (k === "`" ? "`` ` ``" : `\`${k}\``);
+	const lead = comboLabel(p.settings.toolKeys.leader || "");
+	const out: string[] = [
+		"# Excalidraw Hotkeys guide",
+		"",
+		"Keyboard control for Excalidraw drawings in Obsidian. In Obsidian, run **Open the guide**, or press the leader key and then `?`, to see this with your own keys.",
+		"",
+		"## Learn these first",
+		"",
+		"| Key | What it does |",
+		"|---|---|",
+		"| `Alt` | Hold it for a moment in a drawing. A panel shows every Alt key. Same for Ctrl and Shift. |",
+		`| ${lead ? code(lead) : "no key yet"} | The leader key. Press it, and a panel shows a menu of plain letters. Follow the letters. You never need to remember them. |`,
+		`| ${keys("search")} | Search for any style or command in your own words, like blue dashed thick. |`,
+		"| `Alt+1` … `Alt+8` | Pen colours. Add Shift for fill colours. |",
+		`| ${keys("repeat")} | Do your last change again, on the next shape. |`,
+		`| ${keys("mind-child")} | On a box: add a connected box and type its label. Press again for the next one. |`,
+		"",
+		"## One rule for every style key",
+		"",
+		"- Something selected: the key changes it.",
+		"- Nothing selected: the key changes your pen, for the next thing you draw.",
+		"- Typing a text: the key changes that text.",
+		"",
+		"## The leader menu",
+		"",
+		lead ? `Press ${code(lead)}, then a letter, then the next. Esc cancels.` : "Give the leader key a key in Settings, Drawing keys.",
+		"",
+	];
+	for (const [key, node] of p.leaderTree().children ?? new Map<string, LeaderNode>()) {
+		if (!node.children) {
+			out.push(`- ${code(comboLabel(key))} **${node.label}**`, "");
+			continue;
+		}
+		out.push(`### ${code(comboLabel(key))} ${node.label}`, "");
+		const row = (prefix: string, n: LeaderNode) => {
+			for (const [k, c] of n.children ?? new Map<string, LeaderNode>()) {
+				if (c.children) row(`${prefix}${comboLabel(k)} `, c);
+				else out.push(`- ${code(prefix + comboLabel(k))} ${c.label}`);
+			}
+		};
+		row("", node);
+		out.push("");
+	}
+	out.push("## Keys that work only in a drawing", "", "| Key | What it does |", "|---|---|");
+	for (const a of p.actions) {
+		const key = p.settings.toolKeys[a.id];
+		if (key && a.id !== "leader") out.push(`| ${code(comboLabel(key))} | ${shortName(a.name)} |`);
+	}
+	out.push(
+		"",
+		"## Good to know",
+		"",
+		"- Every change is one undo step. Ctrl+Z takes it back.",
+		"- Line up and spread keep a caption with its drawing, and a label with its box.",
+		"- Arrows leave from the sides that face each other, and curve like a hand-drawn map. Pick the arrow style in Settings, Moving and sizing.",
+		"- The bar at the bottom: click a preset to use it, right-click to save over it, + to save a new one.",
+		"- Record a macro: leader, Q, R. Do the steps. Leader, Q, R again to stop.",
+		"",
+		"All commands and their keys: run **Show my hotkeys**.",
+		"",
+	);
+	return out.join("\n");
+}
+
+class GuideModal extends Modal {
+	constructor(app: App, private plugin: ExcalidrawHotkeys) {
+		super(app);
+	}
+
+	/** The keys for a command right now: its drawing key, then its hotkeys. */
+	private keys(id: string): string[] {
+		const p = this.plugin;
+		const tool = p.settings.toolKeys[id];
+		return [...(tool ? [comboLabel(tool)] : []), ...p.hotkeysFor(id).map(hotkeyLabel)];
+	}
+
+	private kbd(el: HTMLElement, keys: string[], fallback = "no key yet") {
+		if (keys.length === 0) el.createSpan({ cls: "ekh-none", text: fallback });
+		keys.forEach((k, i) => {
+			if (i > 0) el.appendText(" or ");
+			el.createEl("kbd", { text: k });
+		});
+	}
+
+	onOpen() {
+		const p = this.plugin;
+		const { contentEl } = this;
+		this.modalEl.addClass("ekh-guide-modal");
+		this.titleEl.setText("Excalidraw Hotkeys guide");
+		const lead = comboLabel(p.settings.toolKeys.leader || "");
+
+		contentEl.createEl("h3", { text: "Learn these first" });
+		const first = contentEl.createDiv({ cls: "ekh-guide-grid" });
+		const row = (keys: string[], what: string) => {
+			const k = first.createDiv({ cls: "ekh-guide-keys" });
+			this.kbd(k, keys);
+			first.createDiv({ cls: "ekh-guide-what", text: what });
+		};
+		row(["Alt"], "Hold it for a moment in a drawing. A panel shows every Alt key. Same for Ctrl and Shift.");
+		row(lead ? [lead] : [], "The leader key. Press it, and a panel shows a menu of plain letters. Follow the letters. You never need to remember them.");
+		row(this.keys("search"), "Search for any style or command in your own words, like blue dashed thick.");
+		row(["Alt+1 … 8"], "Pen colours. Add Shift for fill colours.");
+		row(this.keys("repeat"), "Do your last change again, on the next shape.");
+		row(this.keys("mind-child"), "On a box: add a connected box and type its label. Press again for the next one.");
+
+		contentEl.createEl("h3", { text: "One rule for every style key" });
+		const rule = contentEl.createEl("ul");
+		rule.createEl("li", { text: "Something selected: the key changes it." });
+		rule.createEl("li", { text: "Nothing selected: the key changes your pen, for the next thing you draw." });
+		rule.createEl("li", { text: "Typing a text: the key changes that text." });
+
+		contentEl.createEl("h3", { text: "The leader menu" });
+		contentEl.createEl("p", { cls: "ekh-guide-note", text: lead ? `Press ${lead}, then a letter, then the next. Esc cancels.` : "Give the leader key a key in Settings, Drawing keys." });
+		const map = contentEl.createDiv({ cls: "ekh-guide-map" });
+		for (const [key, node] of p.leaderTree().children ?? new Map<string, LeaderNode>()) {
+			const card = map.createDiv({ cls: "ekh-guide-card" });
+			const head = card.createDiv({ cls: "ekh-guide-card-head" });
+			head.createEl("kbd", { text: comboLabel(key) });
+			head.createSpan({ text: node.label });
+			if (!node.children) continue;
+			const list = card.createDiv({ cls: "ekh-guide-card-list" });
+			for (const [k, n] of node.children) {
+				const item = list.createDiv();
+				item.createEl("kbd", { text: comboLabel(k) });
+				item.appendText(n.children ? ` ${n.label}…` : ` ${n.label}`);
+			}
+		}
+
+		contentEl.createEl("h3", { text: "Keys that work only in a drawing" });
+		const dk = contentEl.createDiv({ cls: "ekh-guide-grid" });
+		for (const a of p.actions) {
+			const key = p.settings.toolKeys[a.id];
+			if (!key || a.id === "leader") continue;
+			const k = dk.createDiv({ cls: "ekh-guide-keys" });
+			this.kbd(k, [comboLabel(key)]);
+			dk.createDiv({ cls: "ekh-guide-what", text: shortName(a.name) });
+		}
+
+		contentEl.createEl("h3", { text: "Good to know" });
+		const tips = contentEl.createEl("ul");
+		tips.createEl("li", { text: "Every change is one undo step. Ctrl+Z takes it back." });
+		tips.createEl("li", { text: "Line up and spread keep a caption with its drawing, and a label with its box." });
+		tips.createEl("li", { text: "The bar at the bottom: click a preset to use it, right-click to save over it, + to save a new one." });
+		tips.createEl("li", { text: "Record a macro: leader, Q, R. Do the steps. Leader, Q, R again to stop." });
+
+		const bar = contentEl.createDiv({ cls: "modal-button-container" });
+		const note = bar.createEl("button", { text: "Save as note" });
+		note.addEventListener("click", () => {
+			void (async () => {
+				const path = normalizePath("Excalidraw Hotkeys guide.md");
+				const text = guideMarkdown(p);
+				const file = this.app.vault.getAbstractFileByPath(path);
+				if (file instanceof TFile) await this.app.vault.modify(file, text);
+				else await this.app.vault.create(path, text);
+				new Notice(`Saved to ${path}`);
+			})();
+		});
+		const all = bar.createEl("button", { text: "Show all my keys" });
+		const settings = bar.createEl("button", { text: "Change keys", cls: "mod-cta" });
+		all.addEventListener("click", () => {
+			this.close();
+			new HotkeyListModal(this.app, p).open();
+		});
+		settings.addEventListener("click", () => {
+			this.close();
+			const setting = (this.app as AppInternals).setting;
+			setting?.open();
+			setting?.openTabById(p.manifest.id);
+		});
+	}
+
+	onClose() {
+		this.contentEl.empty();
 	}
 }

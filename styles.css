@@ -134,34 +134,56 @@
 	color: var(--text-muted);
 }
 
-/* Preset bar: a row of saved pens at the bottom of a drawing */
+/* One-letter field for a leader menu key */
+.ekh-letter {
+	width: 3em;
+	text-align: center;
+}
+
+/*
+ * Preset bar: one more island in Excalidraw's bottom row. It takes the island look
+ * (background, shadow, corners) from Excalidraw's own .Island class, and matches its
+ * 40px height, 4px padding and 32px buttons.
+ */
 .ekh-preset-bar {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	padding: 4px;
+	box-sizing: border-box;
+	height: 40px;
+	max-width: 100%;
+	overflow: hidden;
+	pointer-events: all;
+}
+
+/* Away from the bottom row: float where that row would be. */
+.ekh-preset-bar.is-floating {
 	position: absolute;
 	left: 50%;
 	bottom: 16px;
 	transform: translateX(-50%);
 	z-index: 5;
-	display: flex;
-	gap: 4px;
-	padding: 4px;
+	max-width: calc(100% - 32px);
 	background: var(--island-bg-color, var(--background-primary));
 	border-radius: var(--border-radius-lg, var(--radius-m));
 	box-shadow: var(--shadow-island, var(--shadow-s));
 }
 
 .ekh-preset-bar .ekh-preset {
-	display: flex;
+	display: inline-flex;
 	align-items: center;
-	gap: 6px;
-	min-height: 36px;
-	min-width: 36px;
-	padding: 0 8px;
-	box-shadow: none;
+	justify-content: center;
+	flex: none;
+	height: 32px;
+	min-width: 32px;
+	padding: 0;
+	margin: 0;
 	border: none;
+	box-shadow: none;
 	background: transparent;
-	color: var(--text-primary-color, var(--text-normal));
-	border-radius: var(--border-radius-md, var(--radius-s));
-	font-variant-numeric: tabular-nums;
+	color: var(--icon-fill-color, var(--text-normal));
+	border-radius: var(--border-radius-lg, 8px);
 	cursor: pointer;
 }
 
@@ -169,34 +191,184 @@
 	background: var(--button-hover-bg, var(--background-modifier-hover));
 }
 
-.is-mobile .ekh-preset-bar {
-	bottom: 72px;
+.ekh-preset-bar .ekh-preset:active {
+	background: var(--button-active-bg, var(--background-modifier-active-hover));
 }
 
-.is-mobile .ekh-preset-bar .ekh-preset {
-	min-height: 44px;
-	min-width: 44px;
+.ekh-preset-bar .ekh-preset svg {
+	width: 16px;
+	height: 16px;
 }
 
-/* Ring is the pen colour, inside is the fill. */
+/* A preset: the ring is the pen colour, the inside is the fill. A recent colour is a full dot. */
 .ekh-preset-bar .ekh-swatch {
+	width: 18px;
+	height: 18px;
 	border-radius: 50%;
 	background-color: var(--ekh-swatch-fill, transparent);
 	box-shadow: inset 0 0 0 3px var(--ekh-swatch, transparent);
 }
 
-/* Excalidraw makes its dark buttons by flipping light ones. The bar does the same, so swatches match the drawing. */
-.excalidraw.theme--dark .ekh-preset-bar {
+.ekh-preset-bar .ekh-recent .ekh-swatch {
+	width: 14px;
+	height: 14px;
+}
+
+/* The drawing flips its colours in dark mode. The dots copy that flip, so they match what you draw. */
+.excalidraw.theme--dark .ekh-preset-bar .ekh-swatch {
 	filter: var(--theme-filter, invert(93%) hue-rotate(180deg));
 }
 
 .ekh-preset-bar .ekh-preset-add {
-	font-size: var(--font-ui-medium);
 	color: var(--color-gray-60, var(--text-muted));
 }
 
-/* One-letter field for a leader menu key */
-.ekh-letter {
-	width: 3em;
-	text-align: center;
+/* A thin line between presets, recent colours and your own buttons, like the one in Excalidraw's toolbar. */
+.ekh-preset-bar .ekh-bar-sep {
+	flex: none;
+	align-self: stretch;
+	width: 1px;
+	margin: 4px 3px;
+	background: var(--default-border-color, var(--background-modifier-border));
+}
+
+.ekh-preset-bar .ekh-bar-cmd {
+	padding: 0 8px;
+	font-size: var(--font-ui-small);
+	white-space: nowrap;
+}
+
+/* Bigger buttons for a finger. */
+.is-mobile .ekh-preset-bar {
+	height: 48px;
+}
+
+.is-mobile .ekh-preset-bar .ekh-preset {
+	height: 40px;
+	min-width: 40px;
+}
+
+
+.ekh-rec {
+	color: var(--text-error);
+	font-weight: var(--font-semibold);
+}
+
+.ekh-rec::before {
+	content: "● ";
+}
+
+/* In Excalidraw's bottom row: lay out in a line like the zoom island, with the same 4px gap. */
+.excalidraw .App-bottom-bar > .Island.ekh-preset-bar,
+.excalidraw .layer-ui__wrapper__footer-left .Island.ekh-preset-bar {
+	flex-direction: row;
+	flex: none;
+	padding: 4px;
+	margin-inline-start: 4px;
+}
+
+/* The tray row is only 19rem wide; let it grow to fit the presets. */
+.excalidraw--tray.excalidraw .App-bottom-bar:has(> .ekh-preset-bar) {
+	max-width: calc(100% - 28px);
+	width: auto;
+}
+
+/* Never under Obsidian's status bar: the plugin sets the room it has. More than fits fades at the edge. */
+.excalidraw .ekh-preset-bar.Island {
+	max-width: var(--ekh-bar-max, 100%);
+}
+
+.ekh-preset-bar.is-clipped .ekh-bar-scroll {
+	-webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+	mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+}
+
+/* The row of buttons inside the island. */
+.ekh-preset-bar .ekh-bar-scroll {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	min-width: 0;
+	height: 100%;
+	overflow-x: auto;
+	scrollbar-width: none;
+}
+
+.ekh-preset-bar .ekh-bar-scroll::-webkit-scrollbar {
+	display: none;
+}
+
+/* No room beside Excalidraw's row: the island sits just above the row's left end. */
+.excalidraw .Island.ekh-preset-bar.is-lifted {
+	position: absolute;
+	left: 0;
+	bottom: calc(100% + 4px);
+	margin-inline-start: 0;
+}
+
+/* Guide */
+.ekh-guide-modal {
+	width: min(760px, 92vw);
+}
+
+.ekh-guide-modal h3 {
+	margin: var(--size-4-4) 0 var(--size-4-2);
+	font-size: var(--font-ui-medium);
+}
+
+.ekh-guide-grid {
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	gap: var(--size-4-2) var(--size-4-4);
+	align-items: baseline;
+}
+
+.ekh-guide-keys {
+	white-space: nowrap;
+}
+
+.ekh-guide-note {
+	color: var(--text-muted);
+	margin: 0 0 var(--size-4-2);
+}
+
+.ekh-guide-map {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+	gap: var(--size-4-2);
+	align-items: start;
+}
+
+.ekh-guide-card {
+	padding: var(--size-4-2) var(--size-4-3);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.ekh-guide-card-head {
+	display: flex;
+	gap: var(--size-4-2);
+	align-items: center;
+	font-weight: var(--font-semibold);
+}
+
+.ekh-guide-card-list {
+	margin-top: var(--size-4-1);
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+	line-height: 1.7;
+}
+
+.ekh-guide-modal kbd {
+	font-size: var(--font-ui-smaller);
+}
+
+/* Phones: one column, keys above what they do. */
+.is-mobile .ekh-guide-grid {
+	grid-template-columns: 1fr;
+	gap: 2px;
+}
+
+.is-mobile .ekh-guide-what {
+	margin-bottom: var(--size-4-2);
 }

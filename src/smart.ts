@@ -9,7 +9,20 @@ const GROUPS: string[][] = [
 	["teal", "cyan", "turquoise", "aqua"],
 	["pink", "rose"],
 	["centre", "center", "middle", "centred", "centered"],
-	["ellipse", "circle", "oval", "round", "ellipses", "circles"],
+	["ellipse", "circle", "oval", "ellipses", "circles"],
+	["rounded", "round", "roundness", "soft"],
+	["elbow", "elbowed", "orthogonal", "bent"],
+	["curved", "curve", "curvy", "bendy"],
+	["sketchiness", "roughness", "sloppiness"],
+	["mindmap", "mind", "child", "children", "branch"],
+	["sibling", "beside", "next"],
+	["connect", "join", "link", "tie", "wire"],
+	["stamp", "stamps", "template", "templates", "snippet"],
+	["macro", "macros", "record", "recording", "playback"],
+	["turn", "rotate", "rotation", "spin"],
+	["flip", "mirror"],
+	["lock", "locked", "pin", "freeze"],
+	["similar", "matching", "alike"],
 	["rectangle", "square", "box", "rect", "boxes", "squares", "rectangles"],
 	["diamond", "rhombus"],
 	["pen", "pencil", "marker", "freehand", "draw", "drawing", "write", "writing", "freedraw", "ink", "stroke", "outline", "border"],
@@ -42,7 +55,7 @@ const GROUPS: string[][] = [
 	["align", "alignment", "justify"],
 	["lineup", "arrange", "tidy"],
 	["spread", "distribute", "even", "evenly", "space", "spacing", "spaced"],
-	["repeat", "again", "redo", "same"],
+	["repeat", "again", "redo"],
 	["reset", "default", "defaults"],
 ];
 const CANON = new Map<string, string>();
@@ -64,6 +77,7 @@ export function words(text: string): string[] {
 		.toLowerCase()
 		.replace(/hand-drawn/g, "handdrawn")
 		.replace(/line[\s-]+up/g, "lineup")
+		.replace(/mind[\s-]*map/g, "mindmap")
 		.replace(/see[\s-]*through/g, "seethrough")
 		.split(/[^a-z0-9]+/)
 		.filter(Boolean)
@@ -82,7 +96,6 @@ function distance(a: string, b: string): number {
 	return d[a.length][b.length];
 }
 
-/** How well one search word fits one item word: 3 same, 2 start, 1.5 or 1 typo, 0 none. */
 /** True when w is q with one letter added. */
 function missedOne(q: string, w: string): boolean {
 	let i = 0;
