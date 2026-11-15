@@ -12,7 +12,7 @@ Every action is an Obsidian command. You choose the keys in **Settings → Hotke
 
 1. Install and turn on the plugin. It needs the Excalidraw plugin.
 2. On first start, a popup asks if you want the suggested keys. Press **Use suggested keys**.
-3. Or later: open **Settings → Excalidraw Hotkeys → Keys** and press **Use suggested keys**. This gives every command without a key the key in the table below. Keys you already set stay as they are. **Reset all keys to suggested** replaces them all.
+3. Or later: open **Settings → Excalidraw Hotkeys → Keys** and press **Use suggested keys**. This gives every command without a key the key in the table below. Keys you already set stay as they are, and a suggested key that another command already uses is skipped. **Reset all keys to suggested** replaces them all.
 
 **New here? Run Open the guide** (or press the leader key, then `?`). It shows the six keys to learn first, the one rule all style keys follow, and a map of the leader menu, all with your own keys.
 

@@ -1019,16 +1019,33 @@ export default class ExcalidrawHotkeys extends Plugin {
 	async applySuggestedKeys(replace = false): Promise<number> {
 		const hm = (this.app as AppInternals).hotkeyManager;
 		if (!hm?.setHotkeys) return 0;
+		// A suggested key that another command already uses is skipped, so nothing you rely on breaks.
+		const mine = `${this.manifest.id}:`;
+		const sig = (h: Hotkey) =>
+			[...h.modifiers].map((m) => (m === "Mod" ? (Platform.isMacOS ? "Meta" : "Ctrl") : m)).sort().join("+") + "+" + h.key.toUpperCase();
+		const taken = new Set<string>();
+		for (const map of [hm.customKeys, hm.defaultKeys]) {
+			for (const [id, keys] of Object.entries(map ?? {})) {
+				// Replacing all: this plugin's own old keys do not count.
+				if ((replace && id.startsWith(mine)) || !Array.isArray(keys)) continue;
+				// A command's own setting replaces its default key.
+				if (map === hm.defaultKeys && hm.customKeys && id in hm.customKeys) continue;
+				for (const h of keys) taken.add(sig(h));
+			}
+		}
+		const free = (keys: Hotkey[] | undefined) => (keys ?? []).filter((h) => !taken.has(sig(h)));
 		let n = 0;
 		for (const a of this.actions) {
 			const full = `${this.manifest.id}:${a.id}`;
 			if (replace) {
-				hm.setHotkeys(full, a.keys ?? []);
+				hm.setHotkeys(full, free(a.keys));
 				n++;
 				continue;
 			}
-			if (!a.keys || (hm.customKeys?.[full] ?? []).length > 0) continue;
-			hm.setHotkeys(full, a.keys);
+			const keys = free(a.keys);
+			if (keys.length === 0 || (hm.customKeys?.[full] ?? []).length > 0) continue;
+			hm.setHotkeys(full, keys);
+			for (const h of keys) taken.add(sig(h));
 			n++;
 		}
 		await hm.save?.();
