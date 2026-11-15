@@ -1,7 +1,10 @@
 import {
 	App,
+	FileView,
 	Hotkey,
 	ItemView,
+	MarkdownRenderer,
+	Menu,
 	Modal,
 	Modifier,
 	Notice,
@@ -14,10 +17,14 @@ import {
 	SettingDefinitionItem,
 	SuggestModal,
 	TFile,
+	ViewStateResult,
+	WorkspaceLeaf,
 	setIcon,
+	moment,
 	normalizePath,
 } from "obsidian";
 import { FILLER, match, rank, wordScore, words } from "./smart";
+import CHANGELOG from "../CHANGELOG.md";
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -52,6 +59,14 @@ interface HotkeySettings {
 	zoomMs: number;
 	/** Milliseconds for a move to glide into place. 0 jumps. */
 	moveMs: number;
+	/** Show the key when you click a button that has one. */
+	keyCoach: boolean;
+	/** How many times each command's key was shown. */
+	coachSeen: Record<string, number>;
+	/** Arrows this plugin laid are drawn again after a mouse drag. */
+	followDrags: boolean;
+	/** The bar: auto (one button on phones and tablets), button, or full. */
+	touchBar: string;
 	/** How new arrows look: curved (a soft S), straight, elbow, or like your pen. */
 	arrowStyle: string;
 	zoomOnSelection: boolean;
@@ -62,6 +77,9 @@ interface HotkeySettings {
 	barCommands: string[];
 	stamps: Stamp[];
 	macros: (Macro | null)[];
+	/** The version the last "What's new" was for. Empty before the first start. */
+	seenVersion: string;
+	showWhatsNew: boolean;
 }
 
 /** A saved group of shapes, placed with one key. Positions start at 0, 0. */
@@ -131,6 +149,10 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 	zoomPresets: [25, 50, 100, 200, 400],
 	zoomMs: 350,
 	moveMs: 160,
+	keyCoach: true,
+	coachSeen: {},
+	followDrags: true,
+	touchBar: "auto",
 	arrowStyle: "curved",
 	zoomOnSelection: true,
 	notePath: "Excalidraw Hotkeys.md",
@@ -138,6 +160,8 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 	barCommands: [],
 	stamps: [],
 	macros: Array<Macro | null>(9).fill(null),
+	seenVersion: "",
+	showWhatsNew: true,
 };
 
 // ---------------------------------------------------------------------------
@@ -210,6 +234,7 @@ interface ExcalidrawAPI {
 	getAppState(): AppState;
 	getSceneElementsIncludingDeleted(): El[];
 	updateScene(scene: { elements?: El[]; appState?: Record<string, unknown>; captureUpdate?: string }): void;
+	scrollToContent?(): void;
 	setActiveTool?(tool: { type: string }): void;
 }
 
@@ -218,7 +243,14 @@ interface EA {
 	style: { strokeColor: string; strokeWidth: number; roughness: number };
 	getViewSelectedElements(): El[];
 	getViewElements(): El[];
-	copyViewElementsToEAforEditing(els: El[]): void;
+	copyViewElementsToEAforEditing(els: El[], copyImages?: boolean): void;
+	clear?(): void;
+	reset?(): void;
+	create?(opts: { filename?: string; onNewPane?: boolean; silent?: boolean }): Promise<string>;
+	addText(x: number, y: number, text: string, opts?: Record<string, unknown>): string;
+	addArrow(points: [number, number][], opts?: { startArrowHead?: string | null; endArrowHead?: string | null }): string;
+	addLine(points: [number, number][]): string;
+	createPNG?(template?: string, scale?: number, settings?: unknown, loader?: unknown, theme?: string, padding?: number): Promise<unknown>;
 	getElements(): El[];
 	getElement(id: string): El;
 	addElementsToView(repositionToCursor: boolean, save: boolean): Promise<boolean>;
@@ -385,7 +417,7 @@ const LEADER_MENUS: [string, string, string][] = [
 	["arrowtype", "Arrow shape", "R"],
 	["shape", "Change shape", "B"],
 	["mind", "Connect and mind map", "N"],
-	["styleclip", "Copy and paste style", "Y"],
+	["styleclip", "Copy, paste and export", "Y"],
 	["similar", "Select similar", "M"],
 	["turn", "Turn, flip and lock", "U"],
 	["link", "Link to a note", "I"],
@@ -485,6 +517,22 @@ async function commitEA(ea: EA, select: string[]) {
 	merged.push(...changed.values());
 	const selectedElementIds = Object.fromEntries(select.map((id) => [id, true]));
 	api.updateScene({ elements: merged, appState: { selectedElementIds }, captureUpdate: "IMMEDIATELY" });
+}
+
+/** Where this device remembers that it has a keyboard. */
+const KEYBOARD_KEY = "excalidraw-hotkeys-keyboard";
+
+/** The commands a phone or tablet without a keyboard gets. */
+const TOUCH_COMMANDS = [
+	"search", "mind-child", "mind-sibling", "connect", "tidy-map", "fold-branch",
+	"layout-flow", "layout-timeline", "layout-kanban", "layout-matrix", "copy-image", "image-to-note",
+	"align-left", "align-centre", "align-top", "align-middle", "spread-across", "spread-down", "tidy-grid",
+];
+
+/** The box a fold badge belongs to, if this is one. */
+function foldBadgeOf(e: El): string | undefined {
+	const v = (e as unknown as { customData?: { ekhFoldBadge?: unknown } }).customData?.ekhFoldBadge;
+	return typeof v === "string" ? v : undefined;
 }
 
 /** Select these elements, and nothing else. */
@@ -870,7 +918,26 @@ export default class ExcalidrawHotkeys extends Plugin {
 			this.endLeader();
 		});
 		this.registerDomEvent(window, "mousedown", () => this.endLeader(), { capture: true });
-		this.app.workspace.onLayoutReady(() => this.welcome());
+		this.registerDomEvent(window, "click", (e) => this.coach(e), { capture: true });
+		this.registerDomEvent(window, "pointerdown", (e) => this.onDragStart(e), { capture: true });
+		this.registerDomEvent(window, "pointerup", () => this.onDragEnd(), { capture: true });
+		this.addCommand({
+			id: "practice",
+			name: "Practice the keys",
+			callback: () => void this.practice(),
+		});
+		this.registerView(WHATS_NEW_VIEW, (leaf) => new WhatsNewView(leaf));
+		this.addCommand({
+			id: "whats-new",
+			name: "What's new",
+			callback: () => void this.openWhatsNew(),
+		});
+		this.app.workspace.onLayoutReady(() => {
+			// A new install has never been welcomed: it gets the welcome, not a list of changes.
+			const fresh = !this.settings.welcomed;
+			this.welcome();
+			void this.afterUpdate(fresh);
+		});
 
 		this.addSettingTab(new HotkeySettingTab(this.app, this));
 
@@ -886,9 +953,25 @@ export default class ExcalidrawHotkeys extends Plugin {
 	private registered = new Set<string>();
 
 	/** Add every command, and add or remove the one-by-one ones to match the setting. */
+	/**
+	 * A keyboard on this device. Always on a computer. On a phone or tablet only when you turn it on,
+	 * and that choice stays on that device (it is not synced to the others).
+	 */
+	keyboardHere(): boolean {
+		return !Platform.isMobile || this.app.loadLocalStorage(KEYBOARD_KEY) === "1";
+	}
+
+	setKeyboardHere(on: boolean) {
+		this.app.saveLocalStorage(KEYBOARD_KEY, on ? "1" : null);
+		this.registerCommands();
+		this.updateBar();
+	}
+
 	registerCommands() {
+		const keys = this.keyboardHere();
 		for (const a of this.actions) {
-			const want = (!a.oneByOne || this.settings.showOneByOne) && (!a.back || this.settings.shiftGoesBack);
+			// Without a keyboard, only the commands that make sense to tap.
+			const want = keys ? (!a.oneByOne || this.settings.showOneByOne) && (!a.back || this.settings.shiftGoesBack) : TOUCH_COMMANDS.includes(a.id);
 			if (want && !this.registered.has(a.id)) {
 				this.addCommand({
 					id: a.id,
@@ -975,6 +1058,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.settings.barCommands = [...(saved.barCommands ?? [])];
 		this.settings.stamps = (saved.stamps ?? []).map((s) => ({ ...s }));
 		this.settings.macros = Array.from({ length: 9 }, (_, i) => saved.macros?.[i] ?? null);
+		this.settings.coachSeen = { ...(saved.coachSeen ?? {}) };
+		if (!["auto", "button", "full"].includes(this.settings.touchBar)) this.settings.touchBar = "auto";
 	}
 
 	async saveSettings() {
@@ -1016,7 +1101,14 @@ export default class ExcalidrawHotkeys extends Plugin {
 	}
 
 	/** Give each command its suggested key. Without replace, keys the user set stay. */
-	async applySuggestedKeys(replace = false): Promise<number> {
+	/** The commands each key set gives keys to. All: every suggested key. */
+	private inKeySet(id: string, set: string): boolean {
+		if (set === "leader") return id === "search";
+		if (set === "basic") return ["stroke-colour-", "fill-colour-", "no-line", "no-fill", "search", "cycle-line-width", "cycle-line-style", "duplicate-"].some((p) => id.startsWith(p));
+		return true;
+	}
+
+	async applySuggestedKeys(replace = false, set = "all"): Promise<number> {
 		const hm = (this.app as AppInternals).hotkeyManager;
 		if (!hm?.setHotkeys) return 0;
 		// A suggested key that another command already uses is skipped, so nothing you rely on breaks.
@@ -1033,16 +1125,16 @@ export default class ExcalidrawHotkeys extends Plugin {
 				for (const h of keys) taken.add(sig(h));
 			}
 		}
-		const free = (keys: Hotkey[] | undefined) => (keys ?? []).filter((h) => !taken.has(sig(h)));
+		const free = (keys: Hotkey[] | undefined, id = "") => (this.inKeySet(id, set) ? (keys ?? []) : []).filter((h) => !taken.has(sig(h)));
 		let n = 0;
 		for (const a of this.actions) {
 			const full = `${this.manifest.id}:${a.id}`;
 			if (replace) {
-				hm.setHotkeys(full, free(a.keys));
+				hm.setHotkeys(full, free(a.keys, a.id));
 				n++;
 				continue;
 			}
-			const keys = free(a.keys);
+			const keys = free(a.keys, a.id);
 			if (keys.length === 0 || (hm.customKeys?.[full] ?? []).length > 0) continue;
 			hm.setHotkeys(full, keys);
 			for (const h of keys) taken.add(sig(h));
@@ -1059,6 +1151,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 	}
 
 	private onKeyDown(e: KeyboardEvent) {
+		if (!this.keyboardHere()) return;
 		this.pressed.add(e.code);
 		if (this.leader) return this.onLeaderKey(e);
 		if (isModifierCode(e.code)) {
@@ -1263,6 +1356,10 @@ export default class ExcalidrawHotkeys extends Plugin {
 	// Which-key: hold modifiers for a moment to see every key that uses them.
 	private whichTimer = 0;
 	private whichMods = "";
+	/** The key panel has shown since the practice started. */
+	sawWhichKey = false;
+	/** The last tidy, line up or copy, for the practice. */
+	lastDone = "";
 
 	private armWhichKey(e: KeyboardEvent) {
 		window.clearTimeout(this.whichTimer);
@@ -1320,6 +1417,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 	private showWhichKey(mods: string[]) {
 		const label = mods.map((m) => (m === "Meta" ? (Platform.isMacOS ? "Cmd" : "Win") : m === "Alt" && Platform.isMacOS ? "Option" : m)).join("+");
 		this.whichMods = label;
+		this.sawWhichKey = true;
 		this.showPanel(`${label} +`, this.keysWithMods(mods), "Let go to hide.");
 	}
 
@@ -1458,6 +1556,12 @@ export default class ExcalidrawHotkeys extends Plugin {
 				["V", lineUp("Spread down", "down")],
 				["G", leaf("Tidy into a grid", (c) => this.tidyGrid(c))],
 				["P", leaf("Swap two shapes", (c) => this.swap(c))],
+				["L", menu("Layouts", [
+					["F", leaf("Flowchart", (c) => this.layout(c, "flow"))],
+					["T", leaf("Timeline", (c) => this.layout(c, "timeline"))],
+					["K", leaf("Kanban board", (c) => this.layout(c, "kanban"))],
+					["M", leaf("2×2 grid", (c) => this.layout(c, "matrix"))],
+				])],
 				["Z", menu("Same size", [
 					["W", leaf("Same width", (c) => this.sameSize(c, "width"))],
 					["H", leaf("Same height", (c) => this.sameSize(c, "height"))],
@@ -1479,10 +1583,14 @@ export default class ExcalidrawHotkeys extends Plugin {
 				["N", leaf("New connected box", (c) => this.grow(c, false))],
 				["B", leaf("New box beside", (c) => this.grow(c, true))],
 				["C", leaf("Connect the selected shapes", (c) => this.connect(c))],
+				["T", leaf("Tidy the mind map", (c) => this.tidyMap(c))],
+				["F", leaf("Fold or open a branch", (c) => this.toggleFold(c))],
 			]),
-			styleclip: menu("Copy and paste style", [
+			styleclip: menu("Copy, paste and export", [
 				["C", leaf("Copy style", (c) => this.copyStyle(c))],
 				["V", leaf("Paste style", (c) => this.pasteStyle(c))],
+				["I", leaf("Copy as an image", (c) => this.copyImage(c))],
+				["N", leaf("Put as an image in a note", (c) => this.imageToNote(c))],
 			]),
 			similar: menu("Select similar", [
 				["C", leaf("Same pen colour", (c) => this.selectSimilar(c, "colour"))],
@@ -1729,6 +1837,24 @@ export default class ExcalidrawHotkeys extends Plugin {
 				void this.tracked(now, () => (it.style ? this.applyStyle(now, it.style, label) : it.run?.(now)));
 			}, 50);
 		}).open();
+	}
+
+	/** After an update, open the list of changes once. */
+	private async afterUpdate(fresh: boolean) {
+		const was = this.settings.seenVersion;
+		const now = this.manifest.version;
+		if (was === now) return;
+		this.settings.seenVersion = now;
+		await this.saveSettings();
+		if (!fresh && this.settings.showWhatsNew) await this.openWhatsNew(was || "0.7.1");
+	}
+
+	/** Open the "What's new" tab, or bring it to the front. since marks the versions after it as new. */
+	async openWhatsNew(since = "") {
+		const ws = this.app.workspace;
+		const leaf = ws.getLeavesOfType(WHATS_NEW_VIEW)[0] ?? ws.getLeaf("tab");
+		await leaf.setViewState({ type: WHATS_NEW_VIEW, active: true, state: { since } });
+		await ws.revealLeaf(leaf);
 	}
 
 	/** On first start, offer the suggested keys, unless this plugin's keys are already set. */
@@ -2129,6 +2255,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		let units = this.units(c);
 		if (units.length < need) units = this.units(c, false);
 		if (units.length < need) return showInfo(spread ? "Select 3 or more shapes to spread" : "Select 2 or more shapes to line up");
+		this.lastDone = "arrange";
 		const all = {
 			x1: Math.min(...units.map((u) => u.box.x1)),
 			y1: Math.min(...units.map((u) => u.box.y1)),
@@ -2527,6 +2654,602 @@ export default class ExcalidrawHotkeys extends Plugin {
 	}
 
 	// -----------------------------------------------------------------------
+	// Mind map: tidy and fold
+	// -----------------------------------------------------------------------
+
+	/** The top of the map the box is in: follow arrows back until there is no parent. */
+	private mapRoot(c: Ctx, el: El): El {
+		let root = el;
+		const seen = new Set([el.id]);
+		for (let p = this.parentOf(c, root); p && !seen.has(p.id); p = this.parentOf(c, root)) {
+			seen.add(p.id);
+			root = p;
+		}
+		return root;
+	}
+
+	/** The box and the label inside it. */
+	private withLabel(c: Ctx, el: El): El[] {
+		return [el, ...c.all.filter((t) => !t.isDeleted && t.containerId === el.id)];
+	}
+
+	/** Space out the whole map the selected box is in, so no branch overlaps another. The top box stays put. */
+	async tidyMap(c: Ctx) {
+		const start = this.currentStop(c);
+		if (!start || !SHAPES.includes(start.type)) return showInfo("Select a box in the mind map");
+		const root = this.mapRoot(c, start);
+		const kids = new Map<string, El[]>();
+		const seen = new Set([root.id]);
+		const walk = (n: El) => {
+			const list = this.childrenOf(c, n).filter((k) => !seen.has(k.id) && SHAPES.includes(k.type));
+			for (const k of list) seen.add(k.id);
+			kids.set(n.id, list);
+			for (const k of list) walk(k);
+		};
+		walk(root);
+		if ((kids.get(root.id) ?? []).length === 0) return showInfo("This box has no connected boxes to tidy");
+		// The way the map grows, from where its first branch sits now.
+		const first = (kids.get(root.id) ?? [])[0];
+		const v = { x: this.centreOf(first).x - this.centreOf(root).x, y: this.centreOf(first).y - this.centreOf(root).y };
+		const wide = Math.abs(v.x) >= Math.abs(v.y);
+		const gapOut = Math.max(60, this.settings.duplicateGap);
+		const gapSide = 24;
+		const along = (e: El) => (wide ? e.height : e.width);
+		const across = (e: El) => (wide ? e.width : e.height);
+		const span = new Map<string, number>();
+		const size = (n: El): number => {
+			const list = kids.get(n.id) ?? [];
+			const inner = list.reduce((s, k) => s + size(k), 0) + gapSide * Math.max(0, list.length - 1);
+			const v2 = Math.max(along(n), inner);
+			span.set(n.id, v2);
+			return v2;
+		};
+		// Where each box goes: its top-left corner.
+		const goal = new Map<string, { x: number; y: number }>();
+		const place = (n: El, at: { x: number; y: number }, side: number) => {
+			goal.set(n.id, at);
+			const list = [...(kids.get(n.id) ?? [])].sort((a, b) => (wide ? this.centreOf(a).y - this.centreOf(b).y : this.centreOf(a).x - this.centreOf(b).x));
+			const total = list.reduce((s, k) => s + (span.get(k.id) ?? 0), 0) + gapSide * Math.max(0, list.length - 1);
+			const mid = (wide ? at.y : at.x) + along(n) / 2;
+			let pos = mid - total / 2;
+			for (const k of list) {
+				const sp = span.get(k.id) ?? along(k);
+				const a = pos + (sp - along(k)) / 2;
+				const out = side > 0 ? (wide ? at.x : at.y) + across(n) + gapOut : (wide ? at.x : at.y) - gapOut - across(k);
+				place(k, wide ? { x: out, y: a } : { x: a, y: out }, side);
+				pos += sp + gapSide;
+			}
+		};
+		// Branches on both sides of the top box stay on their own side.
+		const sideOf = (k: El) => Math.sign(wide ? this.centreOf(k).x - this.centreOf(root).x : this.centreOf(k).y - this.centreOf(root).y) || 1;
+		goal.set(root.id, { x: root.x, y: root.y });
+		for (const side of [1, -1]) {
+			const branch = (kids.get(root.id) ?? []).filter((k) => sideOf(k) === side);
+			if (!branch.length) continue;
+			const saved = kids.get(root.id);
+			kids.set(root.id, branch);
+			size(root);
+			place(root, { x: root.x, y: root.y }, side);
+			kids.set(root.id, saved ?? []);
+		}
+		const moves = new Map<string, { dx: number; dy: number }>();
+		for (const [id, at] of goal) {
+			const n = c.all.find((e) => e.id === id);
+			if (!n) continue;
+			const dx = at.x - n.x;
+			const dy = at.y - n.y;
+			if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
+			for (const e of this.withLabel(c, n)) moves.set(e.id, { dx, dy });
+			// A fold badge goes with its box.
+			for (const b of c.all.filter((x) => !x.isDeleted && foldBadgeOf(x) === id)) moves.set(b.id, { dx, dy });
+		}
+		if (moves.size === 0) return showInfo("The map is already tidy");
+		await this.applyMoves(c, moves);
+		this.lastDone = "tidy";
+		showInfo("Mind map tidied");
+	}
+
+	/** Hide the boxes that grow from the selected box, or show them again. */
+	async toggleFold(c: Ctx) {
+		const node = this.currentStop(c);
+		if (!node || !SHAPES.includes(node.type)) return showInfo("Select a box in the mind map");
+		const ea = c.ea;
+		const data = (node as unknown as { customData?: Record<string, unknown> }).customData ?? {};
+		const fold = data.ekhFold as { els: El[]; x: number; y: number } | undefined;
+		if (fold) {
+			// Open: put the hidden boxes back, moved as far as the box moved since.
+			const dx = node.x - fold.x;
+			const dy = node.y - fold.y;
+			const badges = c.all.filter((x) => !x.isDeleted && foldBadgeOf(x) === node.id);
+			ea.copyViewElementsToEAforEditing([node, ...badges]);
+			const n = ea.getElement(node.id) as unknown as { customData?: Record<string, unknown> };
+			const rest = { ...(n.customData ?? {}) };
+			delete rest.ekhFold;
+			n.customData = rest;
+			for (const b of badges) ea.getElement(b.id).isDeleted = true;
+			for (const e of fold.els) ea.elementsDict[e.id] = { ...e, x: e.x + dx, y: e.y + dy, isDeleted: false };
+			await commitEA(ea, [node.id]);
+			showInfo(`Showing ${fold.els.filter((e) => SHAPES.includes(e.type)).length} hidden boxes`);
+			return;
+		}
+		// Fold: everything below this box, with the arrows between, and their labels.
+		const boxes = new Set<string>();
+		const walk = (n: El) => {
+			for (const k of this.childrenOf(c, n)) {
+				if (boxes.has(k.id) || k.id === node.id) continue;
+				boxes.add(k.id);
+				walk(k);
+			}
+		};
+		walk(node);
+		if (boxes.size === 0) return showInfo("This box has nothing to fold");
+		const inside = (id: string | undefined) => !!id && (boxes.has(id) || id === node.id);
+		const hide = c.all.filter(
+			(e) =>
+				!e.isDeleted &&
+				(boxes.has(e.id) ||
+					(!!e.containerId && boxes.has(e.containerId)) ||
+					(e.type === "arrow" && inside(e.startBinding?.elementId) && inside(e.endBinding?.elementId)) ||
+					foldBadgeOf(e) !== undefined && boxes.has(foldBadgeOf(e) ?? "")),
+		);
+		const saved = hide.map((e) => JSON.parse(JSON.stringify(e)) as El);
+		ea.copyViewElementsToEAforEditing([node, ...hide]);
+		for (const e of hide) ea.getElement(e.id).isDeleted = true;
+		const n = ea.getElement(node.id) as unknown as { customData?: Record<string, unknown> };
+		n.customData = { ...(n.customData ?? {}), ekhFold: { els: saved, x: node.x, y: node.y } };
+		// A small "+3" beside the box says how many are hidden.
+		Object.assign(ea.style, { strokeColor: "#868e96", fontSize: 16, roughness: 0 });
+		const badge = ea.addText(node.x + node.width + 8, node.y + node.height / 2 - 10, `+${boxes.size}`);
+		(ea.getElement(badge) as unknown as { customData?: Record<string, unknown> }).customData = { ekhFoldBadge: node.id };
+		await commitEA(ea, [node.id]);
+		showInfo(`Folded ${boxes.size} boxes. Same key to show them.`);
+	}
+
+	// -----------------------------------------------------------------------
+	// Layouts
+	// -----------------------------------------------------------------------
+
+	/** Lay the selection out as a flowchart, timeline, kanban board or 2×2 grid. */
+	async layout(c: Ctx, kind: "flow" | "timeline" | "kanban" | "matrix") {
+		let units = this.readingOrder(this.units(c));
+		if (units.length < 2) units = this.readingOrder(this.units(c, false));
+		if (units.length < 2) return showInfo("Select 2 or more shapes first");
+		const w = (u: (typeof units)[number]) => u.box.x2 - u.box.x1;
+		const h = (u: (typeof units)[number]) => u.box.y2 - u.box.y1;
+		const x0 = Math.min(...units.map((u) => u.box.x1));
+		const y0 = Math.min(...units.map((u) => u.box.y1));
+		const maxW = Math.max(...units.map(w));
+		const maxH = Math.max(...units.map(h));
+		const goal = new Map<(typeof units)[number], { x: number; y: number }>();
+		const ea = c.ea;
+		/** Things to draw once the shapes are in place, in the same undo step as the arrows. */
+		let draw: (() => string[]) | null = null;
+		if (kind === "flow" || kind === "timeline") {
+			const gap = kind === "flow" ? Math.max(60, this.settings.duplicateGap) : 40;
+			const axis = y0 + maxH / 2 + (kind === "timeline" ? maxH / 2 + 40 : 0);
+			let x = x0;
+			units.forEach((u, i) => {
+				const up = kind === "timeline" && i % 2 === 1;
+				const y = kind === "flow" ? axis - h(u) / 2 : up ? axis + 40 : axis - 40 - h(u);
+				goal.set(u, { x, y });
+				x += w(u) + gap;
+			});
+			const end = x - gap;
+			if (kind === "timeline") {
+				draw = () => {
+					Object.assign(ea.style, { strokeColor: "#868e96", strokeWidth: 2, roughness: 0 });
+					const ids = [ea.addArrow([[x0 - 30, axis], [end + 40, axis]], { endArrowHead: "arrow", startArrowHead: null })];
+					units.forEach((u, i) => {
+						const g = goal.get(u);
+						if (!g) return;
+						const cx = g.x + w(u) / 2;
+						const edge = i % 2 === 1 ? g.y : g.y + h(u);
+						ids.push(ea.addLine([[cx, edge], [cx, axis]]));
+					});
+					return ids;
+				};
+			}
+		} else if (kind === "kanban") {
+			const colW = maxW + 48;
+			let y = y0 + 56;
+			for (const u of units) {
+				goal.set(u, { x: x0 + 24 + (maxW - w(u)) / 2, y });
+				y += h(u) + 16;
+			}
+			const colH = Math.max(360, y - y0 + 40);
+			draw = () => {
+				const ids: string[] = [];
+				["To do", "Doing", "Done"].forEach((name, i) => {
+					const f = ea.addFrame?.(x0 + i * (colW + 24), y0, colW, colH, name);
+					if (!f) return;
+					ids.push(f);
+					if (i === 0) ea.addElementsToFrame?.(f, units.flatMap((u) => u.els.map((e) => e.id)));
+				});
+				return ids;
+			};
+		} else {
+			// Four boxes around a cross, filled in reading order.
+			const cellW = maxW + 48;
+			const cellH = maxH + 48;
+			const cx = x0 + cellW;
+			const cy = y0 + cellH;
+			const counts = [0, 0, 0, 0];
+			units.forEach((u, i) => {
+				const q = i % 4;
+				const col = q % 2;
+				const row = Math.floor(q / 2);
+				const k = counts[q]++;
+				goal.set(u, { x: cx + (col ? 24 : -24 - w(u)), y: cy + (row ? 24 : -24 - h(u)) + (row ? 1 : -1) * k * (maxH + 16) });
+			});
+			const rows = Math.max(1, ...counts.map((n) => n));
+			const reach = cellH + (rows - 1) * (maxH + 16);
+			draw = () => {
+				Object.assign(ea.style, { strokeColor: "#868e96", strokeWidth: 2, roughness: 0 });
+				return [ea.addLine([[cx - cellW - 16, cy], [cx + cellW + 16, cy]]), ea.addLine([[cx, cy - reach - 16], [cx, cy + reach + 16]])];
+			};
+		}
+		const moves = new Map<string, { dx: number; dy: number }>();
+		for (const [u, g] of goal) {
+			const dx = g.x - u.box.x1;
+			const dy = g.y - u.box.y1;
+			for (const e of u.els) moves.set(e.id, { dx, dy });
+		}
+		await this.applyMoves(c, moves);
+		const now = this.context();
+		if (!now) return;
+		// Then the arrows of a flowchart, or the lines of a timeline, a board or a grid.
+		ea.clear?.();
+		ea.copyViewElementsToEAforEditing([]);
+		const added: string[] = draw ? draw() : [];
+		if (kind === "flow") {
+			const mains = units.map((u) => {
+				const ids = new Set(u.els.map((e) => e.id));
+				return now.all.find((e) => ids.has(e.id) && e.type !== "text" && !LINEAR.includes(e.type)) ?? now.all.find((e) => ids.has(e.id));
+			});
+			for (let i = 0; i + 1 < mains.length; i++) {
+				const a = mains[i];
+				const b = mains[i + 1];
+				if (!a || !b) continue;
+				const tied = now.all.some((x) => x.type === "arrow" && !x.isDeleted && x.startBinding?.elementId === a.id && x.endBinding?.elementId === b.id);
+				if (tied) continue;
+				ea.copyViewElementsToEAforEditing([a, b]);
+				added.push(this.niceArrow(c, a, b, "wide"));
+			}
+		}
+		if (kind === "kanban") {
+			ea.copyViewElementsToEAforEditing(now.all.filter((e) => units.some((u) => u.els.some((x) => x.id === e.id))));
+			const frame = added[0];
+			if (frame) ea.addElementsToFrame?.(frame, units.flatMap((u) => u.els.map((e) => e.id)));
+		}
+		if (ea.getElements().length) await commitEA(ea, units.flatMap((u) => u.els.map((e) => e.id)));
+		showInfo({ flow: "Flowchart", timeline: "Timeline", kanban: "Kanban board", matrix: "2×2 grid" }[kind]);
+	}
+
+	// -----------------------------------------------------------------------
+	// Copy as an image, put in a note
+	// -----------------------------------------------------------------------
+
+	/** A PNG of the selection, or of the whole drawing when nothing is selected. */
+	private async pngOf(c: Ctx): Promise<Blob | null> {
+		const els = c.selected.length ? withBoundText(c) : c.all.filter((e) => !e.isDeleted);
+		if (els.length === 0) return null;
+		const ea = c.ea;
+		ea.clear?.();
+		ea.copyViewElementsToEAforEditing(els, true);
+		try {
+			const png = await ea.createPNG?.(undefined, 2, undefined, undefined, undefined, 16);
+			return png instanceof Blob ? png : null;
+		} catch {
+			return null;
+		} finally {
+			ea.clear?.();
+		}
+	}
+
+	async copyImage(c: Ctx) {
+		const png = await this.pngOf(c);
+		if (!png) return showInfo("Nothing to copy");
+		this.lastDone = "copy";
+		try {
+			await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+			showInfo(c.selected.length ? "Copied the selection as an image" : "Copied the drawing as an image");
+		} catch {
+			showInfo("This device does not let images go on the clipboard. Try: put it in a note.");
+		}
+	}
+
+	imageToNote(c: Ctx) {
+		const drawing = this.app.workspace.getActiveFile();
+		void this.pngOf(c).then((png) => {
+			if (!png) return showInfo("Nothing to put in a note");
+			new NotePickerModal(this.app, false, (note) => {
+				if (!note) return;
+				void (async () => {
+					const name = `${(drawing?.basename ?? "Drawing").replace(/\.excalidraw$/, "")} ${moment().format("YYYY-MM-DD HHmmss")}.png`;
+					const path = await this.app.fileManager.getAvailablePathForAttachment(name, note.path);
+					const file = await this.app.vault.createBinary(path, await png.arrayBuffer());
+					const link = this.app.metadataCache.fileToLinktext(file, note.path);
+					await this.app.vault.process(note, (text) => `${text.replace(/\s*$/, "")}\n\n![[${link}]]\n`);
+					showInfo(`Put in ${note.basename}`);
+				})();
+			}, "Put the image at the end of which note?").open();
+		});
+	}
+
+	// -----------------------------------------------------------------------
+	// Arrows follow a mouse drag
+	// -----------------------------------------------------------------------
+
+	private dragStart: Map<string, string> | null = null;
+
+	private boxKey(e: El): string {
+		const b = this.boxOf(e);
+		return `${Math.round(b.x1)},${Math.round(b.y1)},${Math.round(b.x2)},${Math.round(b.y2)}`;
+	}
+
+	private onDragStart(e: PointerEvent) {
+		this.dragStart = null;
+		if (!this.settings.followDrags || !(e.target as Node | null)?.instanceOf(HTMLCanvasElement)) return;
+		const c = this.context();
+		if (!c) return;
+		this.dragStart = new Map(c.all.filter((x) => !x.isDeleted && !LINEAR.includes(x.type) && x.type !== "text").map((x) => [x.id, this.boxKey(x)]));
+	}
+
+	/** After you drag shapes with the mouse, the arrows this plugin laid are drawn again from the sides that now face each other. */
+	private onDragEnd() {
+		const before = this.dragStart;
+		this.dragStart = null;
+		if (!before) return;
+		window.setTimeout(() => {
+			const c = this.context();
+			const api = c?.ea.getExcalidrawAPI?.();
+			if (!c || !api) return;
+			const byId = new Map(c.all.map((x) => [x.id, x]));
+			const moved = (id: string | undefined) => {
+				const el = id ? byId.get(id) : undefined;
+				return !!el && before.has(el.id) && before.get(el.id) !== this.boxKey(el);
+			};
+			const fixed = new Map<string, El>();
+			for (const ar of c.all) {
+				if (ar.isDeleted || ar.type !== "arrow" || !curveOf(ar)) continue;
+				const a = ar.startBinding ? byId.get(ar.startBinding.elementId) : undefined;
+				const b = ar.endBinding ? byId.get(ar.endBinding.elementId) : undefined;
+				if (!a || !b || !(moved(a.id) || moved(b.id))) continue;
+				const copy = JSON.parse(JSON.stringify(ar)) as El;
+				const type = copy.elbowed ? "elbow" : copy.roundness ? "round" : "sharp";
+				if (routeArrow(copy, this.boxOf(a), this.boxOf(b), type, curveOf(ar))) fixed.set(ar.id, copy);
+			}
+			if (!fixed.size) return;
+			const elements = api.getSceneElementsIncludingDeleted().map((x: El) => {
+				const f = fixed.get(x.id);
+				return f ? { ...f, version: (x.version ?? 1) + 1, versionNonce: newSeed() } : x;
+			});
+			// Part of the drag: one Ctrl+Z still undoes the drag and puts the arrows back.
+			api.updateScene({ elements, captureUpdate: "NEVER" });
+		}, 40);
+	}
+
+	// -----------------------------------------------------------------------
+	// Key coach
+	// -----------------------------------------------------------------------
+
+	/** The keys for a command, as you press them: tool letters, Obsidian hotkeys, or the leader path. */
+	keyLabels(id: string): string[] {
+		if (id.startsWith("leader:")) {
+			const menu = id.slice(7);
+			const def = LEADER_MENUS.find((m) => m[0] === menu)?.[2] ?? "";
+			const key = this.settings.leaderMenuKeys[menu] ?? def;
+			const lead = this.settings.toolKeys.leader;
+			return lead && key ? [`${comboLabel(lead)} then ${comboLabel(key)}`] : [];
+		}
+		const tool = this.settings.toolKeys[id];
+		return [...(tool ? [comboLabel(tool)] : []), ...this.hotkeysFor(id).map(hotkeyLabel)];
+	}
+
+	/** Which of this plugin's commands does what the clicked button does. */
+	private coachFor(t: Element): string | null {
+		const tid = t.closest("[data-testid]")?.getAttribute("data-testid") ?? "";
+		const tools: Record<string, string> = {
+			selection: "tool-select", rectangle: "tool-rectangle", diamond: "tool-diamond", ellipse: "tool-ellipse", arrow: "tool-arrow",
+			line: "tool-line", freedraw: "tool-pen", text: "tool-text", eraser: "tool-eraser", frame: "tool-frame",
+		};
+		if (tid.startsWith("toolbar-")) return tools[tid.slice(8)] ?? null;
+		if (tid.startsWith("color-top-pick-")) {
+			const col = tid.slice(15).toLowerCase();
+			const pick = t.closest("[data-testid]");
+			// Excalidraw shows the line colours first, then the fill colours.
+			const rows = Array.from(new Set(Array.from(pick?.closest(".excalidraw")?.querySelectorAll("[data-testid^='color-top-pick-']") ?? []).map((p) => p.parentElement)));
+			const fill = rows.indexOf(pick?.parentElement ?? null) === 1;
+			if (col === "transparent") return fill ? "no-fill" : "no-line";
+			const list = (fill ? this.settings.fillColours : this.settings.strokeColours).map((x) => x.toLowerCase());
+			const i = list.indexOf(col);
+			return i < 0 ? `leader:${fill ? "fill" : "pen"}` : `${fill ? "fill" : "stroke"}-colour-${i + 1}`;
+		}
+		if (tid.startsWith("strokeWidth-")) return "cycle-line-width";
+		if (tid === "opacity") return "leader:opacity";
+		const input = t.closest("label")?.querySelector("input") ?? (t.instanceOf(HTMLInputElement) ? t : null);
+		const byName: Record<string, string> = { strokeStyle: "cycle-line-style", sloppiness: "cycle-sketch", edges: "toggle-corners", fillStyle: "cycle-fill-style", fontFamily: "cycle-font", textAlign: "cycle-align" };
+		if (input?.name && byName[input.name]) return byName[input.name];
+		const title = t.closest("button")?.getAttribute("title") ?? t.closest("button")?.getAttribute("aria-label") ?? "";
+		if (title === "Duplicate") return "duplicate-right";
+		if (title === "Delete") return "delete";
+		return null;
+	}
+
+	/** You clicked a button that has a key: show the key, a few times for each command. */
+	private coach(e: MouseEvent) {
+		const t = e.target as Node | null;
+		// Often the click lands on the icon inside a button, which is not an HTML element.
+		if (!this.settings.keyCoach || !t?.instanceOf(Element)) return;
+		if ("pointerType" in e && e.pointerType === "touch") return;
+		if (!t.closest(".excalidraw") || t.closest(".ekh-preset-bar")) return;
+		const id = this.coachFor(t);
+		if (!id) return;
+		const keys = this.keyLabels(id);
+		const seen = this.settings.coachSeen[id] ?? 0;
+		if (!keys.length || seen >= 3) return;
+		this.settings.coachSeen[id] = seen + 1;
+		void this.saveSettings();
+		const name = id.startsWith("leader:") ? (LEADER_MENUS.find((m) => m[0] === id.slice(7))?.[1] ?? "") : (this.actions.find((a) => a.id === id)?.name ?? "");
+		window.setTimeout(() => {
+			const f = createFragment((d) => {
+				d.createSpan({ text: "Key for this: " });
+				d.createEl("kbd", { text: keys[0] });
+				if (name) d.createDiv({ cls: "ekh-coach-name", text: name });
+			});
+			new Notice(f, 2500);
+		}, 30);
+	}
+
+	// -----------------------------------------------------------------------
+	// Practice
+	// -----------------------------------------------------------------------
+
+	private practiceEl: HTMLElement | null = null;
+
+	/** A short lesson in a new drawing: six steps, each checked as you do it. */
+	async practice() {
+		const ea = window.ExcalidrawAutomate?.getAPI(undefined);
+		if (!ea?.create) return new Notice("Excalidraw is needed for this");
+		ea.reset?.();
+		Object.assign(ea.style, { strokeColor: "#1e1e1e", backgroundColor: "transparent", roughness: 1, strokeWidth: 2, fontSize: 20 });
+		ea.addText(0, 0, "Start here", { box: "rectangle", width: 180, height: 70, textAlign: "center", textVerticalAlign: "middle" });
+		ea.addText(260, 160, "Second box", { box: "rectangle", width: 180, height: 70, textAlign: "center", textVerticalAlign: "middle" });
+		// A new tab, so the drawing you were in stays where it was.
+		const made = await ea.create({ filename: `Excalidraw Hotkeys practice ${moment().format("YYYY-MM-DD HHmm")}`, silent: true });
+		const file = this.app.vault.getFileByPath(made);
+		if (!file) return;
+		const leaf = this.app.workspace.getLeaf("tab");
+		await leaf.openFile(file, { active: true });
+		await sleepMs(2500);
+		const api = this.context()?.ea.getExcalidrawAPI?.();
+		api?.updateScene({ appState: { zoom: { value: Platform.isPhone ? 0.8 : 1 } }, captureUpdate: "NEVER" });
+		api?.scrollToContent?.();
+		const st = this.settings;
+		const shapes = (c: Ctx) => c.all.filter((e) => !e.isDeleted && SHAPES.includes(e.type));
+		const touchSteps: { text: string; keys: string[]; done: (c: Ctx) => boolean }[] = [
+			{
+				text: "Tap the box that says Start here. Tap the ⚡ button at the top, then Search. Type red and pick it.",
+				keys: [],
+				done: (c) => shapes(c).some((e) => e.strokeColor !== "#1e1e1e"),
+			},
+			{
+				text: "With a box selected, tap ⚡, then Connect and mind map, then New connected box.",
+				keys: [],
+				done: (c) => shapes(c).length >= 3,
+			},
+			{
+				text: "Tap ⚡, then Connect and mind map, then Tidy the mind map.",
+				keys: [],
+				done: () => this.lastDone === "tidy",
+			},
+			{
+				text: "Select two boxes: drag a box around them on an empty spot. Tap ⚡, then Line up and spread, then Left edges.",
+				keys: [],
+				done: () => this.lastDone === "arrange",
+			},
+			{
+				text: "Tap ⚡, then Copy, paste and export, then Copy as an image. You can paste it in any app.",
+				keys: [],
+				done: () => this.lastDone === "copy",
+			},
+		];
+		const keySteps: { text: string; keys: string[]; done: (c: Ctx) => boolean }[] = [
+			{
+				text: `Click the box that says Start here. Press this key to make its line ${hueName(st.strokeColours[1]).toLowerCase()}.`,
+				keys: this.keyLabels("stroke-colour-2"),
+				done: (c) => c.all.some((e) => !e.isDeleted && SHAPES.includes(e.type) && e.strokeColor === st.strokeColours[1]),
+			},
+			{
+				text: "Hold Alt for a moment, without pressing another key. A panel shows what every Alt key does.",
+				keys: ["Alt"],
+				done: () => this.sawWhichKey,
+			},
+			{
+				text: "With a box selected, press this key. A connected box appears. Type a word, then press Escape.",
+				keys: this.keyLabels("mind-child"),
+				done: (c) => c.all.filter((e) => !e.isDeleted && SHAPES.includes(e.type)).length >= 3,
+			},
+			{
+				text: "Select two boxes (hold Shift and click). Press the leader key, then L, then A. Their left edges line up.",
+				keys: this.keyLabels("leader:arrange").map((k) => `${k} then A`),
+				done: (c) => {
+					const xs = c.all.filter((e) => !e.isDeleted && SHAPES.includes(e.type)).map((e) => Math.round(e.x));
+					return new Set(xs).size < xs.length;
+				},
+			},
+			{
+				text: "Select a box. Press this key and type: blue fill. Press Enter.",
+				keys: this.keyLabels("search"),
+				done: (c) => c.all.some((e) => !e.isDeleted && SHAPES.includes(e.type) && e.backgroundColor && e.backgroundColor !== "transparent"),
+			},
+			{
+				text: "Select another box. Press this key to do your last change again.",
+				keys: this.keyLabels("repeat"),
+				done: (c) => {
+					const fills = c.all.filter((e) => !e.isDeleted && SHAPES.includes(e.type) && e.backgroundColor && e.backgroundColor !== "transparent").map((e) => e.backgroundColor);
+					return fills.length >= 2 && new Set(fills).size < fills.length;
+				},
+			},
+		];
+		const steps = this.compactBar() ? touchSteps : keySteps;
+		this.sawWhichKey = false;
+		this.lastDone = "";
+		let i = 0;
+		const view = leaf.view instanceof ItemView ? leaf.view : null;
+		const show = () => {
+			this.practiceEl?.remove();
+			const host = view?.contentEl.querySelector<HTMLElement>(".excalidraw");
+			if (!host) return;
+			const card = host.createDiv({ cls: "Island ekh-practice" });
+			card.addEventListener("pointerdown", (e) => e.preventDefault());
+			this.practiceEl = card;
+			if (i >= steps.length) {
+				card.createDiv({ cls: "ekh-practice-step", text: "All done" });
+				card.createDiv({ cls: "ekh-practice-text", text: steps === keySteps ? "You know the main keys now. The guide shows the rest." : "Everything is under ⚡. The guide shows the rest." });
+				const row = card.createDiv({ cls: "ekh-practice-buttons" });
+				row.createEl("button", { text: "Open the guide", cls: "mod-cta" }).addEventListener("click", () => {
+					stop();
+					new GuideModal(this.app, this).open();
+				});
+				row.createEl("button", { text: "Close" }).addEventListener("click", stop);
+				return;
+			}
+			const s = steps[i];
+			card.createDiv({ cls: "ekh-practice-step", text: `Step ${i + 1} of ${steps.length}` });
+			card.createDiv({ cls: "ekh-practice-text", text: s.text });
+			const k = card.createDiv({ cls: "ekh-practice-keys" });
+			if (s.keys.length) k.createEl("kbd", { text: s.keys[0] });
+			else if (steps === keySteps) k.createSpan({ cls: "ekh-none", text: "No key yet. Set one in Settings, Hotkeys." });
+			else k.remove();
+			const row = card.createDiv({ cls: "ekh-practice-buttons" });
+			row.createEl("button", { text: "Skip" }).addEventListener("click", () => {
+				i++;
+				show();
+			});
+			row.createEl("button", { text: "Stop" }).addEventListener("click", stop);
+		};
+		const timer = window.setInterval(() => {
+			// The practice drawing was closed, or another file opened in its tab: stop.
+			if (!(leaf.view instanceof FileView) || leaf.view.file !== file) return stop();
+			if (this.app.workspace.getActiveFile() !== file) return;
+			const c = this.context();
+			if (!c || i >= steps.length) return;
+			if (steps[i].done(c)) {
+				i++;
+				show();
+			}
+		}, 300);
+		const stop = () => {
+			window.clearInterval(timer);
+			this.practiceEl?.remove();
+			this.practiceEl = null;
+		};
+		this.register(stop);
+		show();
+	}
+
+	// -----------------------------------------------------------------------
 	// Frames
 	// -----------------------------------------------------------------------
 
@@ -2877,6 +3600,16 @@ export default class ExcalidrawHotkeys extends Plugin {
 	/** Show the preset bar in the open drawing, or hide it. */
 	updateBar() {
 		const view = this.app.workspace.getActiveViewOfType(ItemView);
+		if (this.compactBar()) {
+			const drawing = view?.getViewType() === "excalidraw" ? view.contentEl.querySelector<HTMLElement>(".excalidraw") : null;
+			if (drawing && this.mountMenuButton(drawing)) return;
+			if (!drawing) {
+				this.barEl?.remove();
+				this.barEl = null;
+				this.barKey = "";
+				return;
+			}
+		}
 		const on = this.settings.presetBar && view?.getViewType() === "excalidraw";
 		// One more island in Excalidraw's own bottom row, so it looks and sits like the zoom and undo buttons.
 		// Without that row, it floats at the bottom of the drawing.
@@ -2990,6 +3723,101 @@ fitBar() {
 		const want = `${Math.max(80, Math.floor(max))}px`;
 		if (bar.style.getPropertyValue("--ekh-bar-max") !== want) bar.setCssProps({ "--ekh-bar-max": want });
 		bar.toggleClass("is-clipped", strip.scrollWidth > strip.clientWidth + 1 && strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 1);
+	}
+
+	// -----------------------------------------------------------------------
+	// One button for touch
+	// -----------------------------------------------------------------------
+
+	/** One button instead of the bar: on phones and tablets, unless Settings say otherwise. */
+	compactBar(): boolean {
+		const t = this.settings.touchBar;
+		return t === "button" || (t === "auto" && Platform.isMobile);
+	}
+
+	/**
+	 * Put one button in Excalidraw's own top row, beside the Obsidian tools,
+	 * so it takes no room from the drawing. Tap it for every action.
+	 */
+	private mountMenuButton(root: HTMLElement): boolean {
+		// Phone: the top row. Computer and tablet: the column of Obsidian tools on the right.
+		const row = root.querySelector<HTMLElement>(".excalidraw-ui-top-right:not(.library-and-pen), .tray-misc-tools-container");
+		if (!row) return false;
+		if (this.barEl?.parentElement === row) return true;
+		this.barEl?.remove();
+		const like = row.querySelector<HTMLElement>("label.ToolIcon");
+		const btn = row.createEl("label", { cls: `${like?.className ?? "ToolIcon ToolIcon_size_medium"} ekh-menu-button` });
+		const icon = btn.createDiv({ cls: "ToolIcon__icon", attr: { "aria-label": "Excalidraw Hotkeys: all actions", role: "button" } });
+		setIcon(icon, "zap");
+		btn.addEventListener("pointerdown", (e) => e.preventDefault());
+		btn.addEventListener("click", (e) => {
+			e.preventDefault();
+			this.openActionMenu(e, this.leaderTree(), true);
+		});
+		this.barEl = btn;
+		this.barKey = "button";
+		return true;
+	}
+
+	/** The leader menu as a tap menu: every action, with the same names. Folders open the next menu. */
+	openActionMenu(e: MouseEvent, node: LeaderNode, top = false) {
+		const m = new Menu();
+		const st = this.settings;
+		if (top) {
+			// The things you reach for most come first.
+			m.addItem((i) => i.setTitle("Search styles and commands").setIcon("search").onClick(() => this.openSearch()));
+			const saved = st.presets.map((p, n) => ({ p, n })).filter((x): x is { p: Preset; n: number } => !!x.p);
+			if (saved.length) {
+				m.addSeparator();
+				for (const { p, n } of saved) {
+					const title = createFragment((d) => {
+						const sw = d.createSpan({ cls: "ekh-swatch ekh-menu-swatch" });
+						if (p.style.stroke && p.style.stroke !== "transparent") sw.setCssProps({ "--ekh-swatch": p.style.stroke });
+						if (p.style.fill && p.style.fill !== "transparent") sw.setCssProps({ "--ekh-swatch-fill": p.style.fill });
+						d.appendText(p.name);
+					});
+					m.addItem((i) => i.setTitle(title).onClick(() => this.fromBar((c) => this.usePreset(c, n))));
+				}
+			}
+			m.addSeparator();
+		}
+		const icons: Record<string, string> = {
+			"Pen colour": "pen-line", "Fill colour": "paint-bucket", "Line width": "minus", "Line style": "more-horizontal", "Fill style": "grid-3x3",
+			Font: "type", "Font size": "a-large-small", "Text align": "align-left", Arrowheads: "move-right", Opacity: "droplet", "Pen presets": "palette",
+			Zoom: "zoom-in", "Line up and spread": "align-start-vertical", "Sketchy and corners": "pencil", "Arrow shape": "spline", "Change shape": "shapes",
+			"Connect and mind map": "git-fork", "Copy, paste and export": "clipboard", "Select similar": "mouse-pointer-click", "Turn, flip and lock": "rotate-cw",
+			"Link to a note": "link", Frames: "frame", Stamps: "stamp", "Recent colours": "history", Macros: "repeat", "Search styles and commands": "search",
+		};
+		const order = top ? ["Connect and mind map", "Line up and spread", "Recent colours", "Copy, paste and export", "Pen presets"] : [];
+		// Excalidraw's own bar already has colours, line, font, text and zoom: those stay out of this menu.
+		const theirs = ["Pen colour", "Fill colour", "Line width", "Line style", "Fill style", "Font", "Font size", "Text align", "Arrowheads", "Opacity", "Zoom", "Sketchy and corners", "Arrow shape"];
+		const entries = [...(node.children ?? new Map<string, LeaderNode>()).values()].filter(
+			(n) => !(top && (n.label.startsWith("Search") || theirs.includes(n.label))) && !n.label.startsWith("Guide"),
+		);
+		entries.sort((a, b) => {
+			const x = order.indexOf(a.label);
+			const y = order.indexOf(b.label);
+			return (x < 0 ? 99 : x) - (y < 0 ? 99 : y);
+		});
+		for (const n of entries) {
+			m.addItem((i) => {
+				i.setTitle(n.children ? `${n.label} …` : n.label);
+				if (icons[n.label]) i.setIcon(icons[n.label]);
+				i.onClick(() => {
+					if (n.children) window.setTimeout(() => this.openActionMenu(e, n), 50);
+					else if (n.run) {
+						const run = n.run;
+						this.fromBar((c) => run(c));
+					}
+				});
+			});
+		}
+		if (top) {
+			m.addSeparator();
+			m.addItem((i) => i.setTitle("Practice").setIcon("graduation-cap").onClick(() => void this.practice()));
+			m.addItem((i) => i.setTitle("Guide").setIcon("book-open").onClick(() => new GuideModal(this.app, this).open()));
+		}
+		m.showAtMouseEvent(e);
 	}
 
 	private fromBar(fn: (c: Ctx) => unknown) {
@@ -3828,6 +4656,14 @@ fitBar() {
 		add("mind-child", "New connected box (mind map)", "Mind map", (c) => this.grow(c, false));
 		add("mind-sibling", "New box beside (mind map)", "Mind map", (c) => this.grow(c, true));
 		add("connect", "Connect the selected shapes with arrows", "Mind map", (c) => this.connect(c), [hk(["Mod", "Alt"], "A")]);
+		add("tidy-map", "Tidy the mind map", "Mind map", (c) => this.tidyMap(c));
+		add("fold-branch", "Fold or open a branch (mind map)", "Mind map", (c) => this.toggleFold(c));
+		add("layout-flow", "Lay out as a flowchart", "Arrange", (c) => this.layout(c, "flow"));
+		add("layout-timeline", "Lay out as a timeline", "Arrange", (c) => this.layout(c, "timeline"));
+		add("layout-kanban", "Lay out as a kanban board", "Arrange", (c) => this.layout(c, "kanban"));
+		add("layout-matrix", "Lay out as a 2×2 grid", "Arrange", (c) => this.layout(c, "matrix"));
+		add("copy-image", "Copy the selection as an image", "Export", (c) => this.copyImage(c));
+		add("image-to-note", "Put the selection in a note as an image", "Export", (c) => this.imageToNote(c));
 
 		// Style clipboard and select similar ------------------------------------------------
 		add("copy-style", "Copy style", "Style", (c) => this.copyStyle(c), [hk(["Mod", "Alt"], "C")]);
@@ -3978,7 +4814,7 @@ class HotkeyListModal extends Modal {
 // ---------------------------------------------------------------------------
 
 type NumberKey = "moveMs" | "whichKeyDelay" | "nudgeStep" | "nudgeStepShift" | "resizePercent" | "duplicateGap" | "fitPadding" | "zoomMs";
-type ToggleKey = "presetBar" | "whichKey" | "catchKeysFirst" | "showStatusColours" | "showOneByOne" | "shiftGoesBack" | "diagonalNudge" | "copyText" | "copyFill" | "zoomOnSelection";
+type ToggleKey = "keyCoach" | "followDrags" | "showWhatsNew" | "presetBar" | "whichKey" | "catchKeysFirst" | "showStatusColours" | "showOneByOne" | "shiftGoesBack" | "diagonalNudge" | "copyText" | "copyFill" | "zoomOnSelection";
 
 function parseZoomPresets(v: string): number[] {
 	return v
@@ -4007,7 +4843,7 @@ class HotkeySettingTab extends PluginSettingTab {
 		});
 
 		const st = this.plugin.settings;
-		return [
+		const all: SettingDefinitionItem[] = [
 			{
 				type: "group",
 				items: [
@@ -4015,6 +4851,16 @@ class HotkeySettingTab extends PluginSettingTab {
 						name: "Guide",
 						desc: "How to use it all, with your own keys. Also: leader key, then ?.",
 						action: () => new GuideModal(this.app, this.plugin).open(),
+					},
+					{
+						name: this.plugin.keyboardHere() ? "Practice the keys" : "Practice",
+						desc: "A short lesson in a new drawing, about two minutes.",
+						action: () => void this.plugin.practice(),
+					},
+					{
+						name: "What's new",
+						desc: "What changed in each version.",
+						action: () => void this.plugin.openWhatsNew(),
 					},
 					{
 						name: "Show my hotkeys",
@@ -4057,6 +4903,18 @@ class HotkeySettingTab extends PluginSettingTab {
 									},
 									toggle("Show keys while you hold a modifier", "Hold Alt, Ctrl or Shift for a moment in a drawing to see what each key does.", "whichKey"),
 									slider("Wait before showing keys", "Milliseconds to hold before the panel shows.", "whichKeyDelay", 100, 1500, 50),
+									toggle("Show the key when you click a button", "Click a toolbar or style button that has a key, and a short note shows the key. Three times for each.", "keyCoach"),
+									{
+										name: "Use only the basic keys",
+										desc: "Colours, line width and style, duplicate and search. Replaces this plugin's keys.",
+										action: () => void this.plugin.applySuggestedKeys(true, "basic").then(() => new Notice("Basic keys set")),
+									},
+									{
+										name: "Use the leader key only",
+										desc: "Only search gets a key. Everything else is in the leader menu. Replaces this plugin's keys.",
+										action: () => void this.plugin.applySuggestedKeys(true, "leader").then(() => new Notice("Leader key only")),
+									},
+									toggle("Show what's new after an update", "Open the list of changes in a new tab once after each update.", "showWhatsNew"),
 									toggle("Shift goes back", "Alt+Shift with a cycle key goes back one step, for line style, line width, fill style, font, align and arrowheads. Turn off to free those keys.", "shiftGoesBack"),
 									toggle("Show one-by-one commands", "Also list a command for each line style, line width, font, font size, align and arrowhead.", "showOneByOne"),
 									toggle("Catch keys before Excalidraw", "Run these hotkeys before Excalidraw's own keys can use them.", "catchKeysFirst"),
@@ -4237,6 +5095,11 @@ class HotkeySettingTab extends PluginSettingTab {
 									{
 										name: "Save a preset",
 										desc: "In a drawing, run Save pen as preset 1 to 9, or press the leader key, then P, S and a number. It saves the selected shape's style, or your pen.",
+									},
+									{
+										name: "Bar or one button",
+										desc: "One button in the drawing's top row opens every action, and leaves all the room for drawing.",
+										control: { type: "dropdown", key: "touchBar", options: { auto: "One button on phones and tablets", button: "One button everywhere", full: "The full bar everywhere" } },
 									},
 									toggle("Show preset bar", "A row of your presets at the bottom of a drawing. Click one to use it. Right-click one to save over it. + saves a new one.", "presetBar"),
 								],
@@ -4484,6 +5347,7 @@ class HotkeySettingTab extends PluginSettingTab {
 										desc: "How the arrows this plugin draws look: mind map, connect and duplicate. They are drawn again the same way when a shape moves.",
 										control: { type: "dropdown", key: "arrowStyle", options: { curved: "Curved, like a hand-drawn map", straight: "Straight", elbow: "Elbow, with right-angle bends", pen: "Like my pen" } },
 									},
+									toggle("Arrows follow a mouse drag", "When you drag a shape, the arrows this plugin laid are drawn again from the sides that face each other.", "followDrags"),
 									slider("Move speed", "Milliseconds for line up, spread, grid, swap and turn to glide into place. 0 jumps.", "moveMs", 0, 600, 20),
 								],
 							},
@@ -4492,6 +5356,32 @@ class HotkeySettingTab extends PluginSettingTab {
 				],
 			},
 		];
+		const keyboard: SettingDefinitionItem = {
+			type: "group",
+			items: [
+				{
+					name: "I use a keyboard on this device",
+					desc: "Turns on keys, the key panel and the leader key, on this phone or tablet only.",
+					control: { type: "toggle", key: "keyboardHere" },
+				},
+			],
+		};
+		if (!Platform.isMobile) return all;
+		if (this.plugin.keyboardHere()) return [keyboard, ...all];
+		// No keyboard: guide, practice, the bar, arrows, presets, stamps and macros. Nothing about keys.
+		const keep = ["Pen presets", "Stamps and macros", "Moving and sizing"];
+		const drop = ["Show my hotkeys", "Change keys"];
+		const lean = (items: SettingDefinitionItem[]): SettingDefinitionItem[] =>
+			items.flatMap((it): SettingDefinitionItem[] => {
+				const r = it as { type?: string; name?: string; items?: SettingDefinitionItem[] };
+				if (r.type === "page") return keep.includes(r.name ?? "") ? [it] : [];
+				if (r.type === "group") {
+					const inner = lean(r.items ?? []);
+					return inner.length ? [{ ...r, items: inner } as SettingDefinitionItem] : [];
+				}
+				return drop.includes(r.name ?? "") ? [] : [it];
+			});
+		return [...lean(all), keyboard];
 	}
 
 	/** A button that shows the tool's key; click it, then press a key or combo. */
@@ -4605,18 +5495,27 @@ class HotkeySettingTab extends PluginSettingTab {
 	}
 
 	getControlValue(key: string): unknown {
+		if (key === "keyboardHere") return this.plugin.keyboardHere();
 		if (key === "zoomPresets") return this.plugin.settings.zoomPresets.join(", ");
 		return this.plugin.settings[key as keyof HotkeySettings];
 	}
 
 	async setControlValue(key: string, value: unknown): Promise<void> {
 		const st = this.plugin.settings;
+		if (key === "keyboardHere") {
+			// Kept on this device only, not in the synced settings.
+			this.plugin.setKeyboardHere(value === true);
+			this.update();
+			return;
+		}
 		if (key === "zoomPresets") {
 			const nums = parseZoomPresets(String(value));
 			if (nums.length === 0) return;
 			st.zoomPresets = nums;
 		} else if (key === "arrowStyle") {
 			st.arrowStyle = String(value);
+		} else if (key === "touchBar") {
+			st.touchBar = String(value);
 		} else if (key === "notePath") {
 			st.notePath = String(value).trim() || DEFAULT_SETTINGS.notePath;
 		} else if (typeof value === "number") {
@@ -4626,7 +5525,7 @@ class HotkeySettingTab extends PluginSettingTab {
 		}
 		await this.plugin.saveSettings();
 		if (key === "showOneByOne" || key === "shiftGoesBack") this.plugin.registerCommands();
-		if (key === "presetBar") this.plugin.updateBar();
+		if (key === "presetBar" || key === "touchBar") this.plugin.updateBar();
 	}
 }
 
@@ -4642,16 +5541,34 @@ class WelcomeModal extends Modal {
 	onOpen() {
 		this.titleEl.setText("Excalidraw Hotkeys");
 		const { contentEl } = this;
+		if (this.plugin.compactBar()) {
+			contentEl.createEl("p", { text: "In a drawing, tap the ⚡ button in the top row. It has every action: mind map, line up, layouts, colours and more." });
+			contentEl.createEl("p", { text: "It sits beside Excalidraw's own buttons, so the whole screen stays free for drawing." });
+			const row = contentEl.createDiv({ cls: "modal-button-container" });
+			row.createEl("button", { text: "Show me how", cls: "mod-cta" }).addEventListener("click", () => {
+				this.close();
+				void this.plugin.practice();
+			});
+			row.createEl("button", { text: "Use keys too" }).addEventListener("click", () => {
+				void this.plugin.applySuggestedKeys(false, "all").then((n) => new Notice(`Set ${n} keys`));
+				this.close();
+			});
+			row.createEl("button", { text: "Close" }).addEventListener("click", () => this.close());
+			return;
+		}
 		contentEl.createEl("p", { text: "Use the suggested keys? They sit under the left hand, so the other hand stays on the mouse or pen." });
 		contentEl.createEl("p", { text: "You can change any key later in Settings, Hotkeys." });
 		const bar = contentEl.createDiv({ cls: "modal-button-container" });
 		const yes = bar.createEl("button", { text: "Use suggested keys", cls: "mod-cta" });
+		const few = bar.createEl("button", { text: "Only the basics" });
 		const no = bar.createEl("button", { text: "Not now" });
-		yes.addEventListener("click", () => {
-			void this.plugin.applySuggestedKeys().then((n) => new Notice(`Set ${n} keys`));
+		const pick = (set: string) => {
+			void this.plugin.applySuggestedKeys(false, set).then((n) => new Notice(`Set ${n} keys`));
 			this.close();
 			new GuideModal(this.app, this.plugin).open();
-		});
+		};
+		yes.addEventListener("click", () => pick("all"));
+		few.addEventListener("click", () => pick("basic"));
 		no.addEventListener("click", () => this.close());
 	}
 
@@ -4739,9 +5656,10 @@ class NotePickerModal extends SuggestModal<TFile | null> {
 		app: App,
 		private canRemove: boolean,
 		private pick: (file: TFile | null) => void,
+		placeholder = "Find a note to link",
 	) {
 		super(app);
-		this.setPlaceholder("Find a note to link");
+		this.setPlaceholder(placeholder);
 		this.limit = 60;
 	}
 
@@ -4908,6 +5826,14 @@ class GuideModal extends Modal {
 		this.titleEl.setText("Excalidraw Hotkeys guide");
 		const lead = comboLabel(p.settings.toolKeys.leader || "");
 
+		if (p.compactBar()) {
+			contentEl.createEl("h3", { text: "On a phone or tablet" });
+			const t = contentEl.createEl("ul");
+			t.createEl("li", { text: "Tap ⚡ in the drawing's top row. It has every action, with the same names as below." });
+			t.createEl("li", { text: "Menus with … open the next menu. Your presets are at the top." });
+			t.createEl("li", { text: "Search finds any style or command in your own words, like blue dashed thick." });
+			t.createEl("li", { text: "With a keyboard, all the keys below work too." });
+		}
 		contentEl.createEl("h3", { text: "Learn these first" });
 		const first = contentEl.createDiv({ cls: "ekh-guide-grid" });
 		const row = (keys: string[], what: string) => {
@@ -4990,5 +5916,98 @@ class GuideModal extends Modal {
 
 	onClose() {
 		this.contentEl.empty();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// What's new
+// ---------------------------------------------------------------------------
+
+const WHATS_NEW_VIEW = "excalidraw-hotkeys-whats-new";
+
+/** -1, 0 or 1, comparing dotted version numbers. */
+function compareVersions(a: string, b: string): number {
+	const x = a.split(".").map(Number);
+	const y = b.split(".").map(Number);
+	for (let i = 0; i < Math.max(x.length, y.length); i++) {
+		const d = (x[i] ?? 0) - (y[i] ?? 0);
+		if (d) return Math.sign(d);
+	}
+	return 0;
+}
+
+/** The versions in CHANGELOG.md, newest first. */
+function releases(): { version: string; body: string }[] {
+	return CHANGELOG.split(/^## /m)
+		.slice(1)
+		.map((part) => ({ version: /^[0-9.]+/.exec(part)?.[0] ?? "", body: "## " + part.trim() }))
+		.filter((r) => r.version);
+}
+
+/** A tab with the release notes. Versions newer than the one you had are marked New. */
+class WhatsNewView extends ItemView {
+	private since = "";
+
+	constructor(leaf: WorkspaceLeaf) {
+		super(leaf);
+	}
+
+	getViewType() {
+		return WHATS_NEW_VIEW;
+	}
+
+	getDisplayText() {
+		return "What's new in Excalidraw Hotkeys";
+	}
+
+	getIcon() {
+		return "sparkles";
+	}
+
+	async setState(state: unknown, result: ViewStateResult) {
+		const since = (state as { since?: unknown } | null)?.since;
+		this.since = typeof since === "string" ? since : "";
+		await super.setState(state, result);
+		await this.draw();
+	}
+
+	getState(): Record<string, unknown> {
+		return { since: this.since };
+	}
+
+	async onOpen() {
+		await this.draw();
+	}
+
+	private async draw() {
+		const root = this.contentEl;
+		root.empty();
+		root.addClass("ekh-whats-new");
+		const page = root.createDiv({ cls: "ekh-wn-page" });
+		page.createEl("h1", { text: "What's new" });
+		const list = releases();
+		const latest = list[0]?.version ?? "";
+		const fresh = list.filter((r) => this.since && compareVersions(r.version, this.since) > 0);
+		page.createEl("p", {
+			cls: "ekh-wn-lead",
+			text: fresh.length ? `Excalidraw Hotkeys is now ${latest}. Here is what changed since ${this.since}.` : `Excalidraw Hotkeys ${latest}.`,
+		});
+		for (const r of list) {
+			const isNew = fresh.includes(r);
+			const box = page.createDiv({ cls: isNew ? "ekh-wn-release is-new" : "ekh-wn-release" });
+			await MarkdownRenderer.render(this.app, r.body, box, "", this);
+			if (isNew) box.querySelector("h2")?.createSpan({ cls: "ekh-wn-badge", text: "New" });
+		}
+		const foot = page.createDiv({ cls: "ekh-wn-foot" });
+		const off = foot.createEl("button", { text: "Do not open this after updates" });
+		const plugin = (this.app as unknown as { plugins: { plugins: Record<string, ExcalidrawHotkeys | undefined> } }).plugins.plugins["excalidraw-hotkeys"];
+		if (!plugin?.settings.showWhatsNew) off.remove();
+		off.addEventListener("click", () => {
+			if (!plugin) return;
+			plugin.settings.showWhatsNew = false;
+			void plugin.saveSettings();
+			off.remove();
+			new Notice("Turn it on again in Settings, Keys");
+		});
 	}
 }

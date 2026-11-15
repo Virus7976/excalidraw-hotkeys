@@ -1,6 +1,6 @@
 # Excalidraw Hotkeys
 
-Keyboard control for [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) drawings in Obsidian. Colour, fill, line style, fonts, resize, duplicate with an arrow, mind maps, line up and spread, smooth zoom, pen presets, stamps, macros, a leader key, moving between shapes with keys, and a smart search.
+Keyboard control for [Excalidraw](https://github.com/zsviczian/obsidian-excalidraw-plugin) drawings in Obsidian. Colour, fill, line style, fonts, resize, duplicate with an arrow, mind maps, layouts, line up and spread, smooth zoom, pen presets, stamps, macros, a leader key, moving between shapes with keys, and a smart search. On a phone or tablet, one button has every action.
 
 ![Demo](docs/demo.gif)
 
@@ -14,7 +14,7 @@ Every action is an Obsidian command. You choose the keys in **Settings → Hotke
 2. On first start, a popup asks if you want the suggested keys. Press **Use suggested keys**.
 3. Or later: open **Settings → Excalidraw Hotkeys → Keys** and press **Use suggested keys**. This gives every command without a key the key in the table below. Keys you already set stay as they are, and a suggested key that another command already uses is skipped. **Reset all keys to suggested** replaces them all.
 
-**New here? Run Open the guide** (or press the leader key, then `?`). It shows the six keys to learn first, the one rule all style keys follow, and a map of the leader menu, all with your own keys.
+**New here? Run Practice the keys**: a two-minute lesson in a new drawing, where each step checks itself. Or run **Open the guide** (or press the leader key, then `?`). It shows the six keys to learn first, the one rule all style keys follow, and a map of the leader menu, all with your own keys.
 
 Hold Alt, Ctrl or Shift for a moment in a drawing. A panel shows what each key does with it. Let go to hide it.
 
@@ -122,11 +122,15 @@ Select a box and press `Tab`. A new box appears with an arrow from yours, and yo
 
 `Ctrl+Alt+A` ties the selected shapes together with arrows, in the order they sit.
 
+Leader, `N`, `T` tidies the whole map, so no branch overlaps another. Leader, `N`, `F` folds a branch: the boxes under the selected box hide, and a small `+3` says how many. The same key shows them again, next to the box even if you moved it.
+
+![Tidy and fold](docs/media/0.8.0-mindmap.gif)
+
 ### Arrows that look hand-placed
 
 Every arrow this plugin draws (mind map, connect, duplicate) leaves from the sides that face each other, from the middle of each side, with a small gap. When the shapes are in line it is straight. When they are not, it is a soft S-curve, like a hand-drawn map. Choose Curved, Straight, Elbow or Like my pen in Settings → Moving and sizing → Arrow style.
 
-When a shape moves (line up, spread, grid, swap), its arrows are laid fresh the same way, so they never end up cutting across a box. An arrow you drew with your own bends keeps them and stretches.
+When a shape moves (line up, spread, grid, swap), its arrows are laid fresh the same way, so they never end up cutting across a box. An arrow you drew with your own bends keeps them and stretches. This also works when you drag a shape with the mouse (turn it off in Settings → Moving and sizing).
 
 ### Shapes and arrows
 
@@ -157,11 +161,25 @@ It lines things up the way you see them:
 - Shapes too big to have gaps between them get evenly spaced middles.
 - Locked things never move.
 
+Leader, `L`, `L` lays the selection out as a **flowchart** (`F`, in a row with arrows), a **timeline** (`T`), a **kanban board** (`K`, three columns) or a **2×2 grid** (`M`).
+
+![Layouts](docs/media/0.8.0-layouts.gif)
+
 Moves glide into place, and each one is one undo step. Change the speed, or turn the glide off, in Settings → Moving and sizing.
 
 ### Select, turn, lock, link and frames
 
 With the leader key: `M` selects everything like the selected shape (same pen colour, fill, type or style). `U` turns, flips and locks. `I` links the selection to a note, with the smart search. `G` puts the selection in a frame, and jumps from frame to frame like slides.
+
+### Copy as an image
+
+Leader, `Y`, `I` copies the selection as a PNG, or the whole drawing when nothing is selected. Leader, `Y`, `N` saves the PNG and adds it to the end of a note you pick.
+
+### Phones and tablets
+
+Obsidian on a phone or tablet has no keyboard shortcuts, so the plugin keeps to a light version there. A ⚡ button in the drawing's top row opens every action, with the same names as the leader menu. It leaves out what Excalidraw's own bar already has (colours, line, font), and it takes no room from the drawing. With a keyboard (a tablet keyboard cover, DeX), turn on **Settings → Excalidraw Hotkeys → I use a keyboard on this device** to get all the keys on that device.
+
+![The one button on a phone](docs/media/0.8.0-phone.gif)
 
 ### Stamps
 
@@ -200,15 +218,15 @@ Hold two arrow keys to move the selection on a diagonal. Hold Shift too for a bi
 
 The first page has 9 parts:
 
-- **Keys**: use or reset the suggested keys, the key panel and its wait time, Shift goes back, show one-by-one commands, catch keys before Excalidraw, and where the hotkey note goes.
+- **Keys**: use or reset the suggested keys, only the basic keys, or the leader key only, show the key when you click a button, what's new after an update, the key panel and its wait time, Shift goes back, show one-by-one commands, catch keys before Excalidraw, and where the hotkey note goes.
 - **Drawing keys**: a key for each tool, for moving between shapes, the mind map, change shape, repeat, and the leader key. Click a key and press any key or combo. The × button removes it.
 - **Leader menu**: the letter for each menu, and your own sequences for any command.
-- **Pen presets**: the preset bar, your own bar buttons, share, and rename or delete your presets.
+- **Pen presets**: the preset bar, bar or one ⚡ button (one button on phones and tablets by default), your own bar buttons, share, and rename or delete your presets.
 - **Stamps and macros**: rename or delete them.
 - **Colours**: the 8 pen colours and 8 fill colours, and the status bar colours. Colour 1 is Excalidraw's own ink: white in dark mode, black in light mode. If you change a colour, its name follows the new colour. The square next to each colour shows how it looks in the drawing.
 - **Zoom**: the presets, for example `25, 50, 100, 200, 400`, the zoom speed, and zoom on the selection.
 - **Duplicate**: what a copy keeps, and the gap to it.
-- **Moving and sizing**: diagonal move, resize step, fit padding, arrow style and move speed.
+- **Moving and sizing**: diagonal move, resize step, fit padding, arrow style, arrows follow a mouse drag, and move speed.
 
 Every edit is one undo step. `Ctrl+Z` undoes a duplicate with its arrow in one press.
 

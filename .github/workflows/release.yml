@@ -39,7 +39,10 @@ jobs:
             manifest.json
             styles.css
 
+      - name: Take the notes for this version from CHANGELOG.md
+        run: awk -v v="$GITHUB_REF_NAME" -f .github/notes.awk CHANGELOG.md > notes.md && test -s notes.md
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --title "$GITHUB_REF_NAME" --notes-from-tag
+        run: gh release create "$GITHUB_REF_NAME" main.js manifest.json styles.css --title "$GITHUB_REF_NAME" --notes-file notes.md

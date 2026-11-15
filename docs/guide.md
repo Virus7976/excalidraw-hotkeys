@@ -129,6 +129,10 @@ Press `` ` ``, then a letter, then the next. Esc cancels.
 - `V` Spread down
 - `G` Tidy into a grid
 - `P` Swap two shapes
+- `L F` Flowchart
+- `L T` Timeline
+- `L K` Kanban board
+- `L M` 2×2 grid
 - `Z W` Same width
 - `Z H` Same height
 - `Z B` Same width and height
@@ -158,11 +162,15 @@ Press `` ` ``, then a letter, then the next. Esc cancels.
 - `N` New connected box
 - `B` New box beside
 - `C` Connect the selected shapes
+- `T` Tidy the mind map
+- `F` Fold or open a branch
 
-### `Y` Copy and paste style
+### `Y` Copy, paste and export
 
 - `C` Copy style
 - `V` Paste style
+- `I` Copy as an image
+- `N` Put as an image in a note
 
 ### `M` Select similar
 
