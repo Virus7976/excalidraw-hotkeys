@@ -1,7 +1,7 @@
 {
 	"id": "excalidraw-hotkeys",
 	"name": "Excalidraw Hotkeys",
-	"version": "0.9.0",
+	"version": "0.9.1",
 	"minAppVersion": "1.13.0",
 	"description": "Draw in Excalidraw with your keyboard. One key for each colour, fill, line and size. Mind maps from a list, layouts, and arrows that go around boxes.",
 	"author": "Virus7976",

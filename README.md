@@ -180,6 +180,8 @@ Settings → Pen presets → Share exports your presets, colours, stamps, macros
 
 Select 2 or more shapes, press the leader key, then `L`. `A`, `D`, `W` and `S` line up the left, right, top or bottom edges. `C` and `X` centre them. With 3 or more shapes, `H` spreads them out evenly across and `V` spreads them down. `G` tidies them into a grid, `P` swaps two, and `Z` makes them the same size. Each one is also a command, so you can give it a key in Settings → Hotkeys.
 
+Lining up never piles shapes on each other. If a shape would land on another, or too close for an arrow, it moves down (or right) to leave a clear gap. So three boxes lined up left become a neat column.
+
 It lines things up the way you see them:
 
 - A group, a box with its label, and a frame with what is in it move as one.

@@ -500,3 +500,29 @@
 	padding: 0 14px;
 	border-radius: var(--radius-m);
 }
+
+/* Practice keys: one big key each, with "then" between. */
+.ekh-practice-keys {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	margin: 4px 0 8px;
+}
+.ekh-practice-keys kbd {
+	min-width: 32px;
+	padding: 4px 10px;
+	border-radius: 6px;
+	background: var(--background-primary);
+	color: var(--text-normal);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: 0 2px 0 var(--background-modifier-border);
+	font-family: var(--font-monospace);
+	font-size: 18px;
+	font-weight: 600;
+	text-align: center;
+}
+.ekh-practice-then {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}

@@ -623,7 +623,10 @@ function routeArrow(el: El, a: Box, b: Box, type: string, prefer?: string, obsta
 	const gy = Math.max(b.y1 - a.y2, a.y1 - b.y2);
 	if (gx < 4 && gy < 4) return false;
 	// Keep the way the diagram flows (a map that grows right stays side to side), when there is room.
-	const wide = prefer === "wide" && gx >= 4 ? true : prefer === "tall" && gy >= 4 ? false : gx >= gy;
+	// An arrow needs room: a gap at each end and a body you can see. Below that, Excalidraw
+	// re-binds it to the middle of the box. So keep the flow only where there is that much room.
+	const room = 30;
+	const wide = prefer === "wide" && gx >= room ? true : prefer === "tall" && gy >= room ? false : gx >= gy;
 	const gap = 8;
 	const mid = (v: Box): [number, number] => [(v.x1 + v.x2) / 2, (v.y1 + v.y2) / 2];
 	const [ax, ay] = mid(a);
@@ -1646,13 +1649,16 @@ export default class ExcalidrawHotkeys extends Plugin {
 			this.openSearch();
 			return;
 		}
-		const next = [...(node.children ?? new Map<string, LeaderNode>())].find(([k]) => k.toUpperCase() === combo.toUpperCase())?.[1];
-		if (!next) {
+		const kids = [...(node.children ?? new Map<string, LeaderNode>())];
+		const find = (k: string) => kids.find(([own]) => own.toUpperCase() === k.toUpperCase());
+		// The menu shows capital letters, so people press Shift. Shift+L means L unless the menu has its own Shift+L.
+		const hit = find(combo) ?? (combo.startsWith("Shift+") ? find(combo.slice(6)) : undefined);
+		if (!hit) {
 			this.endLeader();
 			showInfo(`No key ${comboLabel(combo)} here`);
 			return;
 		}
-		const key = [...(node.children ?? new Map<string, LeaderNode>())].find(([k]) => k.toUpperCase() === combo.toUpperCase())?.[0] ?? combo;
+		const [key, next] = hit;
 		this.leaderKeys.push(key);
 		if (next.children) {
 			this.leader = next;
@@ -2484,12 +2490,64 @@ export default class ExcalidrawHotkeys extends Plugin {
 				else if (mode === "centre") move(u, (all.x1 + all.x2) / 2 - (b.x1 + b.x2) / 2, 0);
 				else move(u, 0, (all.y1 + all.y2) / 2 - (b.y1 + b.y2) / 2);
 			}
+			this.makeRoom(c, units, moves, mode === "left" || mode === "right" || mode === "centre");
 		}
 		if (moves.size === 0) return showInfo("Already lined up");
 
 		await this.applyMoves(c, moves);
 		const names = { left: "Lined up left", right: "Lined up right", top: "Lined up top", bottom: "Lined up bottom", centre: "Centred left to right", middle: "Centred top to bottom", across: "Spread across", down: "Spread down" };
 		showInfo(names[mode]);
+	}
+
+	/**
+	 * After a line up, no shape may sit on another or so close that an arrow between them breaks.
+	 * Lining up left, right or centre makes a column, so crowded shapes move down; the others make
+	 * a row, so they move right. Shapes joined to the selection by an arrow count too.
+	 */
+	private makeRoom(c: Ctx, units: { els: El[]; box: Box }[], moves: Map<string, { dx: number; dy: number }>, column: boolean) {
+		const MIN = 40;
+		const shift = (u: { els: El[] }) => moves.get(u.els[0].id) ?? { dx: 0, dy: 0 };
+		const at = (u: { els: El[]; box: Box }): Box => {
+			const d = shift(u);
+			return { x1: u.box.x1 + d.dx, y1: u.box.y1 + d.dy, x2: u.box.x2 + d.dx, y2: u.box.y2 + d.dy };
+		};
+		const mine = new Set(units.flatMap((u) => u.els.map((e) => e.id)));
+		const byId = new Map(c.all.map((e) => [e.id, e]));
+		const joined = new Set<string>();
+		for (const e of c.all) {
+			if (e.isDeleted || !e.points) continue;
+			const s = e.startBinding?.elementId;
+			const t = e.endBinding?.elementId;
+			if (s && t && mine.has(s) !== mine.has(t)) joined.add(mine.has(s) ? t : s);
+		}
+		const placed: { b: Box; fixed: boolean }[] = [...joined]
+			.map((id) => byId.get(id))
+			.filter((e): e is El => !!e && !e.isDeleted)
+			.map((e) => ({ b: this.boxOf(e), fixed: true }));
+		const crowded = (p: Box, b: Box) => b.x1 < p.x2 + MIN && p.x1 < b.x2 + MIN && b.y1 < p.y2 + MIN && p.y1 < b.y2 + MIN;
+		const key = (b: Box) => (column ? [b.y1 + b.y2, b.x1 + b.x2] : [b.x1 + b.x2, b.y1 + b.y2]);
+		const order = [...units].sort((a, b) => {
+			const [p, q] = [key(a.box), key(b.box)];
+			return p[0] - q[0] || p[1] - q[1];
+		});
+		for (const u of order) {
+			let b = at(u);
+			let push = 0;
+			for (let k = 0; k < 50; k++) {
+				// A shape that was already that close before the line up is left as it was.
+				const hit = placed.find((p) => crowded(p.b, b) && !(p.fixed && crowded(p.b, u.box)))?.b;
+				if (!hit) break;
+				const d = column ? hit.y2 + MIN - b.y1 : hit.x2 + MIN - b.x1;
+				if (d <= 0) break;
+				push += d;
+				b = column ? { ...b, y1: b.y1 + d, y2: b.y2 + d } : { ...b, x1: b.x1 + d, x2: b.x2 + d };
+			}
+			if (push > 0) {
+				const d = shift(u);
+				for (const e of u.els) moves.set(e.id, column ? { dx: d.dx, dy: d.dy + push } : { dx: d.dx + push, dy: d.dy });
+			}
+			placed.push({ b, fixed: false });
+		}
 	}
 
 	/** The main shape of each selected unit: a box instead of its label, a group's biggest shape. */
@@ -2938,9 +2996,10 @@ export default class ExcalidrawHotkeys extends Plugin {
 			// A fold badge goes with its box.
 			for (const b of c.all.filter((x) => !x.isDeleted && foldBadgeOf(x) === id)) moves.set(b.id, { dx, dy });
 		}
+		// Asking counts, even when nothing has to move (practice waits for it).
+		this.lastDone = "tidy";
 		if (moves.size === 0) return order ? undefined : showInfo("The map is already tidy");
 		await this.applyMoves(c, moves);
-		this.lastDone = "tidy";
 		if (!order) showInfo("Mind map tidied");
 	}
 
@@ -3663,7 +3722,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		ea.reset?.();
 		Object.assign(ea.style, { strokeColor: "#1e1e1e", backgroundColor: "transparent", roughness: 1, strokeWidth: 2, fontSize: 20 });
 		ea.addText(0, 0, "Start here", { box: "rectangle", width: 180, height: 70, textAlign: "center", textVerticalAlign: "middle" });
-		ea.addText(260, 160, "Second box", { box: "rectangle", width: 180, height: 70, textAlign: "center", textVerticalAlign: "middle" });
+		ea.addText(380, 200, "Second box", { box: "rectangle", width: 180, height: 70, textAlign: "center", textVerticalAlign: "middle" });
 		// A new tab, so the drawing you were in stays where it was.
 		const made = await ea.create({ filename: `Excalidraw Hotkeys practice ${moment().format("YYYY-MM-DD HHmm")}`, silent: true });
 		const file = this.app.vault.getFileByPath(made);
@@ -3720,7 +3779,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 				done: (c) => c.all.filter((e) => !e.isDeleted && SHAPES.includes(e.type)).length >= 3,
 			},
 			{
-				text: "Select two boxes (hold Shift and click). Press the leader key, then L, then A. Their left edges line up.",
+				text: "Click one box, then hold Shift and click another. Now press these keys one at a time. Their left edges line up.",
 				keys: this.keyLabels("leader:arrange").map((k) => `${k} then A`),
 				done: (c) => {
 					const xs = c.all.filter((e) => !e.isDeleted && SHAPES.includes(e.type)).map((e) => Math.round(e.x));
@@ -3768,7 +3827,14 @@ export default class ExcalidrawHotkeys extends Plugin {
 			card.createDiv({ cls: "ekh-practice-step", text: `Step ${i + 1} of ${steps.length}` });
 			card.createDiv({ cls: "ekh-practice-text", text: s.text });
 			const k = card.createDiv({ cls: "ekh-practice-keys" });
-			if (s.keys.length) k.createEl("kbd", { text: s.keys[0] });
+			if (s.keys.length) {
+				// One key at a time, each big enough to read; a tiny ` looks like a speck.
+				s.keys[0].split(" then ").forEach((part, n) => {
+					if (n) k.createSpan({ cls: "ekh-practice-then", text: "then" });
+					k.createEl("kbd", { text: part });
+					if (part === "`") k.createSpan({ cls: "ekh-practice-then", text: "(left of 1)" });
+				});
+			}
 			else if (steps === keySteps) k.createSpan({ cls: "ekh-none", text: "No key yet. Set one in Settings, Hotkeys." });
 			else k.remove();
 			const row = card.createDiv({ cls: "ekh-practice-buttons" });

@@ -1,5 +1,19 @@
 # What's new
 
+## 0.9.1 (15 Nov 2026)
+
+**Line up never piles boxes.** If lining up would put a box on another box, or too close to it, the box moves down (or right) until there is a clear gap. Select three boxes and line up their left edges: you get a neat column.
+
+**Arrows stay correct after a line up.** Before, an arrow could end up inside a box when two boxes came very close.
+
+![Three boxes lined up into a column](https://raw.githubusercontent.com/Virus7976/excalidraw-hotkeys/0.9.1/docs/media/0.9.1-lineup.png)
+
+**Shift works in the leader menu.** The menu shows capital letters, so you may press Shift. Now Shift+L means L.
+
+**Practice is clearer.** Each key shows on its own, big, with "then" between. The ` key says where it is (left of 1). On a phone, the tidy step now counts even when the map is already tidy.
+
+![The practice card](https://raw.githubusercontent.com/Virus7976/excalidraw-hotkeys/0.9.1/docs/media/0.9.1-practice.png)
+
 ## 0.9.0 (15 Nov 2026)
 
 **A list becomes a mind map, and back.** Copy a bullet list from any note. In a drawing, press leader, N, V. Each item becomes a box, joined to the item it sits under. Leader, N, Y copies a map as a list. Leader, N, I puts the list in a note.
