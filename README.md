@@ -56,6 +56,10 @@ The suggested keys are all under the left hand, so the right hand stays on the m
 | Save pen as preset 1–9 | none (or the leader key, then P, S and a number) |
 | **Search** | |
 | Search styles and commands | `Alt+Z` |
+| **Line up and spread** (leader, then L) | |
+| Line up left / right / top / bottom edges | `` ` L A `` / `D` / `W` / `S` |
+| Centre left to right / top to bottom | `` ` L C `` / `` ` L X `` |
+| Spread out evenly across / down | `` ` L H `` / `` ` L V `` |
 | **Drawing keys** (set in Settings → Drawing keys) | |
 | Select / Rectangle / Diamond / Arrow / Text / Eraser / Frame | `V` / `R` / `D` / `A` / `T` / `E` / `F` |
 | Ellipse (C for circle) / Line (S for straight) / Pen (W for write) | `C` / `S` / `W` |
@@ -63,6 +67,7 @@ The suggested keys are all under the left hand, so the right hand stays on the m
 | Select the shape above / left / below / right | `Shift+W` / `A` / `S` / `D` |
 | Follow the arrow out of / back into the selected shape | `Shift+F` / `Shift+R` |
 | Leader key | `` ` `` (the key left of 1) |
+| Repeat the last change | `G` |
 | **Other** | |
 | Show my hotkeys | none |
 
@@ -80,9 +85,19 @@ Colour and style keys work on what you are using:
 
 Pen keys change lines, arrows and text. Fill keys change only the inside of boxes, circles and diamonds. Each colour key shows a short popup with the colour. The status bar at the bottom right shows your pen and fill colour while a drawing is open.
 
+### Repeat
+
+`G` does your last change again, like `.` in vim. Make one box red, dashed and bold. Then select the next box and press `G`. All the changes you made to one thing count as one change. With nothing selected, `G` puts the change on your pen.
+
 ### Pen presets
 
 A preset is a saved pen: colour, fill, fill style, line width, line style, font, size, align, arrowheads and opacity. **Save pen as preset N** saves the selected shape's style, or your pen if nothing is selected. **Use pen preset N** works like every other key: on the selection, on your pen, or on the text you type. Rename or delete presets in Settings → Pen presets.
+
+The **preset bar** at the bottom of a drawing shows your presets. Click one to use it. Right-click one to save over it. `+` saves a new one. You can turn the bar off in Settings → Pen presets.
+
+### Line up and spread
+
+Select 2 or more shapes, press the leader key, then `L`. `A`, `D`, `W` and `S` line up the left, right, top or bottom edges. `C` and `X` centre them. With 3 or more shapes, `H` spreads them out evenly across and `V` spreads them down. A group, and a box with its label, move as one. Arrows tied to a shape follow it. Each one is also a command, so you can give it a key in Settings → Hotkeys.
 
 ### Leader key
 
@@ -91,9 +106,11 @@ Press the leader key (`` ` ``), then a short row of plain keys. A panel shows th
 - `` ` C 3 ``: pen colour 3. `` ` F 0 ``: no fill.
 - `` ` W 2 ``: bold line. `` ` S D ``: dashed. `` ` H X ``: cross-hatch fill.
 - `` ` P 1 ``: use preset 1. `` ` P S 1 ``: save preset 1.
-- `` ` V 3 ``: zoom preset 3. `` ` ` `` or `` ` / ``: search.
+- `` ` V 3 ``: zoom preset 3. `` ` L A ``: line up left edges. `` ` ` `` or `` ` / ``: search.
 
 Escape or a click cancels.
+
+Change the menu letters in Settings → Leader menu. There you can also add your own sequences for any Obsidian command, like `` ` G G `` for one you use a lot. Settings tells you when a sequence replaces a built-in key.
 
 ### Move between shapes
 
@@ -109,11 +126,12 @@ Hold two arrow keys to move the selection on a diagonal. Hold Shift too for a bi
 
 ## Settings
 
-The first page has 7 parts:
+The first page has 8 parts:
 
 - **Keys**: use or reset the suggested keys, the key panel and its wait time, Shift goes back, show one-by-one commands, catch keys before Excalidraw, and where the hotkey note goes.
-- **Drawing keys**: a key for each tool, for moving between shapes, and the leader key. Click a key and press any key or combo. The × button removes it.
-- **Pen presets**: rename or delete your presets.
+- **Drawing keys**: a key for each tool, for moving between shapes, repeat, and the leader key. Click a key and press any key or combo. The × button removes it.
+- **Leader menu**: the letter for each menu, and your own sequences for any command.
+- **Pen presets**: the preset bar, and rename or delete your presets.
 - **Colours**: the 8 pen colours and 8 fill colours, and the status bar colours. Colour 1 is Excalidraw's own ink: white in dark mode, black in light mode. If you change a colour, its name follows the new colour. The square next to each colour shows how it looks in the drawing.
 - **Zoom**: the presets, for example `25, 50, 100, 200, 400`, the zoom speed, and zoom on the selection.
 - **Duplicate**: what a copy keeps, and the gap to it.

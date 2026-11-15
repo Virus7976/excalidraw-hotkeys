@@ -33,6 +33,10 @@ interface HotkeySettings {
 	whichKey: boolean;
 	whichKeyDelay: number;
 	presets: (Preset | null)[];
+	presetBar: boolean;
+	/** The letter for each built-in leader menu, by menu id. Empty turns a menu off. */
+	leaderMenuKeys: Record<string, string>;
+	leaderCustom: LeaderCustom[];
 	/** Plain letter per tool command id, used only inside a drawing. */
 	toolKeys: Record<string, string>;
 	diagonalNudge: boolean;
@@ -64,6 +68,9 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 	whichKey: true,
 	whichKeyDelay: 500,
 	presets: Array<Preset | null>(9).fill(null),
+	presetBar: true,
+	leaderMenuKeys: {},
+	leaderCustom: [],
 	toolKeys: {
 		"tool-select": "V",
 		"tool-rectangle": "R",
@@ -83,6 +90,7 @@ const DEFAULT_SETTINGS: HotkeySettings = {
 		"follow-arrow": "Shift+F",
 		"follow-arrow-back": "Shift+R",
 		leader: "Backquote",
+		repeat: "G",
 	},
 	diagonalNudge: true,
 	nudgeStep: 12,
@@ -141,6 +149,7 @@ interface El {
 	endArrowhead?: string | null;
 	startBinding?: { elementId: string } | null;
 	endBinding?: { elementId: string } | null;
+	points?: [number, number][];
 }
 
 interface AppState {
@@ -197,7 +206,13 @@ interface SettingWindow {
 }
 
 /** Internal parts of App that Obsidian does not type. */
-type AppInternals = App & { hotkeyManager?: HotkeyManager; setting?: SettingWindow };
+interface CommandsApi {
+	commands?: Record<string, { id: string; name: string }>;
+	executeCommandById(id: string): boolean;
+	listCommands?(): { id: string; name: string }[];
+}
+
+type AppInternals = App & { hotkeyManager?: HotkeyManager; setting?: SettingWindow; commands?: CommandsApi };
 
 declare global {
 	interface Window {
@@ -283,6 +298,30 @@ interface SearchItem {
 	style?: Style;
 	run?: (c: Ctx) => unknown;
 }
+
+/** A key sequence of your own after the leader key, for any command. */
+interface LeaderCustom {
+	keys: string;
+	command: string;
+}
+
+/** The built-in leader menus: id, name and suggested letter. */
+const LEADER_MENUS: [string, string, string][] = [
+	["pen", "Pen colour", "C"],
+	["fill", "Fill colour", "F"],
+	["width", "Line width", "W"],
+	["linestyle", "Line style", "S"],
+	["fillstyle", "Fill style", "H"],
+	["font", "Font", "T"],
+	["size", "Font size", "Z"],
+	["align", "Text align", "A"],
+	["heads", "Arrowheads", "E"],
+	["opacity", "Opacity", "O"],
+	["presets", "Pen presets", "P"],
+	["zoom", "Zoom", "V"],
+	["arrange", "Line up and spread", "L"],
+	["search", "Search", "Slash"],
+];
 
 const SHAPES = ["rectangle", "ellipse", "diamond"];
 const BOXES = ["rectangle", "ellipse", "diamond", "image", "embeddable", "frame"];
@@ -586,7 +625,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 						if (!c || (c.typing && !a.whileTyping) || !a.canRun(c)) return false;
 						if (!checking) {
 							this.markRan(a.id);
-							void a.run(c);
+							void this.runAction(a, c);
 						}
 						return true;
 					},
@@ -606,6 +645,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 
 	/** Show the stroke and fill colour that the next drawn thing gets. */
 	updateStatus() {
+		this.updateBar();
 		const el = this.statusEl;
 		if (!el) return;
 		const view = this.app.workspace.getActiveViewOfType(ItemView);
@@ -635,6 +675,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		stopRecording?.();
 		window.clearTimeout(this.whichTimer);
 		this.hidePanel();
+		this.barEl?.remove();
 		window.cancelAnimationFrame(this.zoomFrame);
 	}
 
@@ -645,6 +686,13 @@ export default class ExcalidrawHotkeys extends Plugin {
 		this.settings.strokeColours = [...(saved.strokeColours ?? DEFAULT_SETTINGS.strokeColours)];
 		this.settings.zoomPresets = [...(saved.zoomPresets ?? DEFAULT_SETTINGS.zoomPresets)];
 		this.settings.toolKeys = { ...DEFAULT_SETTINGS.toolKeys, ...(saved.toolKeys ?? {}) };
+		// A new drawing key steps aside when you already use its key for something else.
+		const used = new Set(Object.values(saved.toolKeys ?? {}).map((k) => k.toUpperCase()));
+		for (const [id, key] of Object.entries(DEFAULT_SETTINGS.toolKeys)) {
+			if (saved.toolKeys && !(id in saved.toolKeys) && used.has(key.toUpperCase())) this.settings.toolKeys[id] = "";
+		}
+		this.settings.leaderMenuKeys = { ...(saved.leaderMenuKeys ?? {}) };
+		this.settings.leaderCustom = (saved.leaderCustom ?? []).map((s) => ({ ...s }));
 		this.settings.presets = Array.from({ length: 9 }, (_, i) => saved.presets?.[i] ?? null);
 	}
 
@@ -739,7 +787,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 			e.preventDefault();
 			e.stopImmediatePropagation();
 			this.markRan(a.id);
-			void a.run(c);
+			void this.runAction(a, c);
 			return;
 		}
 	}
@@ -1040,41 +1088,59 @@ export default class ExcalidrawHotkeys extends Plugin {
 		}
 		this.endLeader();
 		const c = this.context();
-		if (c && next.run) void next.run(c);
+		if (c && next.run) void this.tracked(c, () => next.run?.(c));
 	}
 
-	/** The menu behind the leader key. Letters are picked to be easy to remember. */
-	leaderTree(): LeaderNode {
+	/** The menu behind the leader key. Letters are picked to be easy to remember, and can be changed in Settings. */
+	leaderTree(withCustom = true): LeaderNode {
 		const st = this.settings;
 		const menu = (label: string, entries: [string, LeaderNode][]): LeaderNode => ({ label, children: new Map(entries) });
 		const leaf = (label: string, run: (c: Ctx) => unknown): LeaderNode => ({ label, run });
 		const style = (label: string, s: Style) => leaf(label, (c) => this.applyStyle(c, s, label));
 		const digits = <T,>(list: T[], make: (t: T, i: number) => LeaderNode): [string, LeaderNode][] =>
 			list.map((t, i) => [String(i + 1), make(t, i)]);
+		const lineUp = (label: string, mode: Parameters<ExcalidrawHotkeys["arrange"]>[1]) => leaf(label, (c) => this.arrange(c, mode));
 
-		return menu("Leader", [
-			["C", menu("Pen colour", [["0", style("No line", { stroke: "transparent" })], ...digits(st.strokeColours, (col, i) => style(slotName("stroke", i, col), { stroke: col }))])],
-			["F", menu("Fill colour", [["0", style("No fill", { fill: "transparent" })], ...digits(st.fillColours, (col, i) => style(slotName("fill", i, col), { fill: col }))])],
-			["W", menu("Line width", digits(LINE_WIDTHS, (w) => style(w[1], { strokeWidth: w[2] })))],
-			["S", menu("Line style", [["S", style("Solid", { strokeStyle: "solid" })], ["D", style("Dashed", { strokeStyle: "dashed" })], ["O", style("Dotted", { strokeStyle: "dotted" })]])],
-			["H", menu("Fill style", [["N", style("No fill", { fill: "transparent" })], ["H", style("Hachure", { fillStyle: "hachure" })], ["X", style("Cross-hatch", { fillStyle: "cross-hatch" })], ["S", style("Solid", { fillStyle: "solid" })]])],
-			["T", menu("Font", FONTS.map((f): [string, LeaderNode] => [f[0][0].toUpperCase(), style(f[1], { fontFamily: f[2] })]))],
-			["Z", menu("Font size", [["S", style("Small", { fontSize: 16 })], ["M", style("Medium", { fontSize: 20 })], ["L", style("Large", { fontSize: 28 })], ["X", style("Very large", { fontSize: 36 })]])],
-			["A", menu("Align", [["L", style("Left", { textAlign: "left" })], ["C", style("Centre", { textAlign: "center" })], ["R", style("Right", { textAlign: "right" })]])],
-			["E", menu("Arrowheads", [
+		const menus: Record<string, LeaderNode> = {
+			pen: menu("Pen colour", [["0", style("No line", { stroke: "transparent" })], ...digits(st.strokeColours, (col, i) => style(slotName("stroke", i, col), { stroke: col }))]),
+			fill: menu("Fill colour", [["0", style("No fill", { fill: "transparent" })], ...digits(st.fillColours, (col, i) => style(slotName("fill", i, col), { fill: col }))]),
+			width: menu("Line width", digits(LINE_WIDTHS, (w) => style(w[1], { strokeWidth: w[2] }))),
+			linestyle: menu("Line style", [["S", style("Solid", { strokeStyle: "solid" })], ["D", style("Dashed", { strokeStyle: "dashed" })], ["O", style("Dotted", { strokeStyle: "dotted" })]]),
+			fillstyle: menu("Fill style", [["N", style("No fill", { fill: "transparent" })], ["H", style("Hachure", { fillStyle: "hachure" })], ["X", style("Cross-hatch", { fillStyle: "cross-hatch" })], ["S", style("Solid", { fillStyle: "solid" })]]),
+			font: menu("Font", FONTS.map((f): [string, LeaderNode] => [f[0][0].toUpperCase(), style(f[1], { fontFamily: f[2] })])),
+			size: menu("Font size", [["S", style("Small", { fontSize: 16 })], ["M", style("Medium", { fontSize: 20 })], ["L", style("Large", { fontSize: 28 })], ["X", style("Very large", { fontSize: 36 })]]),
+			align: menu("Text align", [["L", style("Left", { textAlign: "left" })], ["C", style("Centre", { textAlign: "center" })], ["R", style("Right", { textAlign: "right" })]]),
+			heads: menu("Arrowheads", [
 				["N", style("None", { startArrowhead: null, endArrowhead: null })],
 				["E", style("End", { startArrowhead: null, endArrowhead: "arrow" })],
 				["B", style("Both", { startArrowhead: "arrow", endArrowhead: "arrow" })],
 				["S", style("Start", { startArrowhead: "arrow", endArrowhead: null })],
-			])],
-			["O", menu("Opacity", [["0", style("100%", { opacity: 100 })], ...digits([1, 2, 3, 4, 5, 6, 7, 8, 9], (n) => style(`${n * 10}%`, { opacity: n * 10 }))])],
-			["P", menu("Pen presets", [
+			]),
+			opacity: menu("Opacity", [["0", style("100%", { opacity: 100 })], ...digits([1, 2, 3, 4, 5, 6, 7, 8, 9], (n) => style(`${n * 10}%`, { opacity: n * 10 }))]),
+			presets: menu("Pen presets", [
 				...digits(st.presets, (p, i) => leaf(p ? p.name : `Preset ${i + 1} (empty)`, (c) => this.usePreset(c, i))),
 				["S", menu("Save pen as preset", digits(st.presets, (p, i) => leaf(p ? `Replace: ${p.name}` : `Preset ${i + 1} (empty)`, (c) => this.savePreset(c, i))))],
-			])],
-			["V", menu("Zoom", digits(st.zoomPresets, (z, i) => leaf(`${z}%`, (c) => this.actions.find((a) => a.id === `zoom-preset-${i + 1}`)?.run(c))))],
-			["Slash", leaf("Search styles and commands", () => this.openSearch())],
-		]);
+			]),
+			zoom: menu("Zoom", digits(st.zoomPresets, (z, i) => leaf(`${z}%`, (c) => this.actions.find((a) => a.id === `zoom-preset-${i + 1}`)?.run(c)))),
+			arrange: menu("Line up and spread", [
+				["A", lineUp("Left edges", "left")],
+				["D", lineUp("Right edges", "right")],
+				["W", lineUp("Top edges", "top")],
+				["S", lineUp("Bottom edges", "bottom")],
+				["C", lineUp("Centre left to right", "centre")],
+				["X", lineUp("Centre top to bottom", "middle")],
+				["H", lineUp("Spread across", "across")],
+				["V", lineUp("Spread down", "down")],
+			]),
+			search: leaf("Search styles and commands", () => this.openSearch()),
+		};
+		const root = menu("Leader", []);
+		for (const [id, , def] of LEADER_MENUS) {
+			const key = st.leaderMenuKeys[id] ?? def;
+			if (key) root.children?.set(key, menus[id]);
+		}
+		if (withCustom) this.addCustom(root);
+		return root;
 	}
 
 	// -----------------------------------------------------------------------
@@ -1181,7 +1247,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		for (const fs of ["hachure", "cross-hatch", "solid"]) style(`Fill style: ${fs}`, "fillstyle", { fillStyle: fs }, fs === "hachure" ? "hatch hatched lines" : fs === "cross-hatch" ? "crosshatch" : "full");
 		for (const [, name, fam] of FONTS) style(`Font: ${name}`, "font", { fontFamily: fam });
 		for (const [name, size] of FONT_SIZES) style(`Font size: ${name}`, "size", { fontSize: size }, "text");
-		for (const al of ["left", "center", "right"]) style(`Align: ${al === "center" ? "centre" : al}`, "align", { textAlign: al }, "text");
+		for (const al of ["left", "center", "right"]) style(`Text align: ${al === "center" ? "centre" : al}`, "align", { textAlign: al }, "text");
 		style("Arrowheads: none", "heads", { startArrowhead: null, endArrowhead: null }, "arrow");
 		style("Arrowheads: end", "heads", { startArrowhead: null, endArrowhead: "arrow" }, "arrow one");
 		style("Arrowheads: both", "heads", { startArrowhead: "arrow", endArrowhead: "arrow" }, "arrow two double");
@@ -1250,8 +1316,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 			window.setTimeout(() => {
 				const now = this.context();
 				if (!now) return;
-				if (it.style) void this.applyStyle(now, it.style, it.label.replace(/^(Preset \d+|[^:]*): /, ""));
-				else void it.run?.(now);
+				void this.tracked(now, () => (it.style ? this.applyStyle(now, it.style, it.label.replace(/^(Preset \d+|[^:]*): /, "")) : it.run?.(now)));
 			}, 50);
 		}).open();
 	}
@@ -1267,6 +1332,307 @@ export default class ExcalidrawHotkeys extends Plugin {
 			return;
 		}
 		new WelcomeModal(this.app, this).open();
+	}
+
+	// -----------------------------------------------------------------------
+	// Repeat: do the last change again on something new
+	// -----------------------------------------------------------------------
+
+	/** The style changes made to one selection (or the pen), for the repeat key. */
+	private change: { sig: string; style: Style } | null = null;
+
+	/** Which thing a change went to: the selected ids, or "pen". */
+	private sigOf(c: Ctx): string {
+		if (c.typing) return "";
+		return c.selected.length > 0
+			? withBoundText(c)
+					.map((e) => e.id)
+					.sort()
+					.join(",")
+			: "pen";
+	}
+
+	/** Run a change and remember the style values it changed. Changes to the same thing add up. */
+	async tracked(c: Ctx, fn: () => unknown): Promise<void> {
+		if (c.typing) {
+			await fn();
+			return;
+		}
+		const sig = this.sigOf(c);
+		const before = this.currentStyle(c);
+		await fn();
+		await new Promise((r) => window.setTimeout(r, 30));
+		const now = this.context();
+		if (!now || this.sigOf(now) !== sig) return;
+		const after = this.currentStyle(now);
+		const diff: Record<string, unknown> = {};
+		for (const k of Object.keys(after) as (keyof Style)[]) if (after[k] !== before[k]) diff[k] = after[k];
+		if (Object.keys(diff).length === 0) return;
+		const style = diff as Style;
+		this.change = this.change?.sig === sig ? { sig, style: { ...this.change.style, ...style } } : { sig, style };
+	}
+
+	/** Do the last change again: on the selection, or on the pen. */
+	async repeat(c: Ctx) {
+		const ch = this.change;
+		if (!ch) return showInfo("Nothing to repeat yet. Change a style first.");
+		if (this.sigOf(c) === ch.sig) return showInfo("Select something else, then repeat");
+		const ok = await this.applyStyle(c, ch.style, `Again: ${describeStyle(ch.style, this.settings)}`);
+		const now = this.context();
+		if (ok && now) this.change = { sig: this.sigOf(now), style: ch.style };
+	}
+
+	/** Run a command and remember what it changed. */
+	runAction(a: Action, c: Ctx): Promise<void> | void {
+		if (a.id === "repeat") return a.run(c);
+		return this.tracked(c, () => a.run(c));
+	}
+
+	// -----------------------------------------------------------------------
+	// Line up and spread out
+	// -----------------------------------------------------------------------
+
+	/** The outside box of one element. Lines and arrows use their points. */
+	private boxOf(e: El): { x1: number; y1: number; x2: number; y2: number } {
+		if (e.points && e.points.length > 0) {
+			const xs = e.points.map((p) => e.x + p[0]);
+			const ys = e.points.map((p) => e.y + p[1]);
+			return { x1: Math.min(...xs), y1: Math.min(...ys), x2: Math.max(...xs), y2: Math.max(...ys) };
+		}
+		return { x1: e.x, y1: e.y, x2: e.x + e.width, y2: e.y + e.height };
+	}
+
+	/**
+	 * The selection as things that move together: a group, or a box with its label.
+	 * An arrow tied to a shape is left out; it follows its shape.
+	 */
+	units(c: Ctx): { els: El[]; box: { x1: number; y1: number; x2: number; y2: number } }[] {
+		const els = withBoundText(c).filter((e) => !e.isDeleted);
+		const byId = new Map(c.all.map((e) => [e.id, e]));
+		const keyOf = (e: El): string => {
+			const owner = e.type === "text" && e.containerId ? byId.get(e.containerId) ?? e : e;
+			return owner.groupIds?.[owner.groupIds.length - 1] ?? owner.id;
+		};
+		const map = new Map<string, El[]>();
+		for (const e of els) {
+			if ((e.type === "arrow" || e.type === "line") && (e.startBinding || e.endBinding)) continue;
+			const k = keyOf(e);
+			map.set(k, [...(map.get(k) ?? []), e]);
+		}
+		// A selected group member brings the whole group.
+		for (const e of c.all) {
+			if (e.isDeleted) continue;
+			const k = e.groupIds?.[e.groupIds.length - 1];
+			if (k && map.has(k) && !map.get(k)?.includes(e)) map.get(k)?.push(e);
+		}
+		return [...map.values()].map((list) => {
+			const boxes = list.map((e) => this.boxOf(e));
+			return {
+				els: list,
+				box: {
+					x1: Math.min(...boxes.map((b) => b.x1)),
+					y1: Math.min(...boxes.map((b) => b.y1)),
+					x2: Math.max(...boxes.map((b) => b.x2)),
+					y2: Math.max(...boxes.map((b) => b.y2)),
+				},
+			};
+		});
+	}
+
+	/** Line up or spread out the selection. Arrows tied to a moved shape follow it. */
+	async arrange(c: Ctx, mode: "left" | "right" | "top" | "bottom" | "centre" | "middle" | "across" | "down") {
+		const units = this.units(c);
+		const spread = mode === "across" || mode === "down";
+		if (units.length < (spread ? 3 : 2)) return showInfo(spread ? "Select 3 or more shapes to spread" : "Select 2 or more shapes to line up");
+		const all = {
+			x1: Math.min(...units.map((u) => u.box.x1)),
+			y1: Math.min(...units.map((u) => u.box.y1)),
+			x2: Math.max(...units.map((u) => u.box.x2)),
+			y2: Math.max(...units.map((u) => u.box.y2)),
+		};
+		const moves = new Map<string, { dx: number; dy: number }>();
+		const move = (u: (typeof units)[number], dx: number, dy: number) => {
+			if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return;
+			for (const e of u.els) moves.set(e.id, { dx, dy });
+		};
+		if (spread) {
+			const across = mode === "across";
+			const lo = (u: (typeof units)[number]) => (across ? u.box.x1 : u.box.y1);
+			const size = (u: (typeof units)[number]) => (across ? u.box.x2 - u.box.x1 : u.box.y2 - u.box.y1);
+			const sorted = [...units].sort((a, b) => lo(a) + size(a) / 2 - (lo(b) + size(b) / 2));
+			const first = sorted[0];
+			const last = sorted[sorted.length - 1];
+			const span = lo(last) + size(last) - lo(first);
+			const gap = (span - sorted.reduce((s, u) => s + size(u), 0)) / (sorted.length - 1);
+			let at = lo(first) + size(first) + gap;
+			for (const u of sorted.slice(1, -1)) {
+				const d = at - lo(u);
+				move(u, across ? d : 0, across ? 0 : d);
+				at += size(u) + gap;
+			}
+		} else {
+			for (const u of units) {
+				const b = u.box;
+				if (mode === "left") move(u, all.x1 - b.x1, 0);
+				else if (mode === "right") move(u, all.x2 - b.x2, 0);
+				else if (mode === "top") move(u, 0, all.y1 - b.y1);
+				else if (mode === "bottom") move(u, 0, all.y2 - b.y2);
+				else if (mode === "centre") move(u, (all.x1 + all.x2) / 2 - (b.x1 + b.x2) / 2, 0);
+				else move(u, 0, (all.y1 + all.y2) / 2 - (b.y1 + b.y2) / 2);
+			}
+		}
+		if (moves.size === 0) return showInfo("Already lined up");
+
+		// Arrows tied to a moved shape: move the tied end with it.
+		const arrows = new Map<string, { start?: { dx: number; dy: number }; end?: { dx: number; dy: number } }>();
+		for (const e of c.all) {
+			if (e.isDeleted || moves.has(e.id) || !e.points || e.points.length < 2) continue;
+			const start = e.startBinding ? moves.get(e.startBinding.elementId) : undefined;
+			const end = e.endBinding ? moves.get(e.endBinding.elementId) : undefined;
+			if (start || end) arrows.set(e.id, { start, end });
+		}
+		const ids = new Set([...moves.keys(), ...arrows.keys()]);
+		await edit(
+			c,
+			c.all.filter((e) => ids.has(e.id)),
+			(el) => {
+				const m = moves.get(el.id);
+				if (m) {
+					el.x += m.dx;
+					el.y += m.dy;
+					return;
+				}
+				const a = arrows.get(el.id);
+				if (!a || !el.points) return;
+				const pts = el.points.map((p): [number, number] => [p[0], p[1]]);
+				if (a.start && a.end && a.start.dx === a.end.dx && a.start.dy === a.end.dy) {
+					el.x += a.start.dx;
+					el.y += a.start.dy;
+				} else {
+					if (a.start) {
+						el.x += a.start.dx;
+						el.y += a.start.dy;
+						for (let i = 1; i < pts.length; i++) pts[i] = [pts[i][0] - a.start.dx, pts[i][1] - a.start.dy];
+					}
+					if (a.end) {
+						const i = pts.length - 1;
+						pts[i] = [pts[i][0] + a.end.dx, pts[i][1] + a.end.dy];
+					}
+					el.points = pts;
+					el.width = Math.max(...pts.map((p) => p[0])) - Math.min(...pts.map((p) => p[0]));
+					el.height = Math.max(...pts.map((p) => p[1])) - Math.min(...pts.map((p) => p[1]));
+				}
+			},
+		);
+		const names = { left: "Lined up left", right: "Lined up right", top: "Lined up top", bottom: "Lined up bottom", centre: "Centred left to right", middle: "Centred top to bottom", across: "Spread across", down: "Spread down" };
+		showInfo(names[mode]);
+	}
+
+	// -----------------------------------------------------------------------
+	// Your own leader sequences
+	// -----------------------------------------------------------------------
+
+	/** "g g" or "gg" as key names: ["G", "G"]. */
+	leaderSteps(keys: string): string[] {
+		const names: Record<string, string> = { "/": "Slash", ".": "Period", ",": "Comma", ";": "Semicolon", "'": "Quote", "[": "BracketLeft", "]": "BracketRight", "-": "Minus", "=": "Equal" };
+		return [...keys.replace(/\s+/g, "").toUpperCase()].map((ch) => names[ch] ?? ch);
+	}
+
+	/** The name of any Obsidian command. */
+	commandName(id: string): string {
+		return (this.app as AppInternals).commands?.commands?.[id]?.name ?? id;
+	}
+
+	/** What a sequence would replace in the built-in leader menu, if anything. */
+	leaderClash(keys: string): string {
+		let node: LeaderNode | undefined = this.leaderTree(false);
+		const path: string[] = [];
+		for (const step of this.leaderSteps(keys)) {
+			node = node?.children?.get(step);
+			if (!node) return "";
+			path.push(node.label);
+			if (!node.children) return path.join(" › ");
+		}
+		return path.length ? `${path.join(" › ")} menu` : "";
+	}
+
+	/** Put the user's own sequences into the menu. Theirs win over a built-in key. */
+	private addCustom(root: LeaderNode) {
+		for (const s of this.settings.leaderCustom) {
+			const steps = this.leaderSteps(s.keys);
+			if (steps.length === 0 || !s.command) continue;
+			let node = root;
+			for (const [i, step] of steps.entries()) {
+				const kids = node.children ?? new Map<string, LeaderNode>();
+				node.children = kids;
+				if (i === steps.length - 1) {
+					const id = s.command;
+					kids.set(step, { label: shortName(this.commandName(id).replace(/^Excalidraw Hotkeys: /, "")), run: () => (this.app as AppInternals).commands?.executeCommandById(id) });
+				} else {
+					let next = kids.get(step);
+					if (!next?.children) {
+						next = { label: "Your keys", children: new Map() };
+						kids.set(step, next);
+					}
+					node = next;
+				}
+			}
+		}
+	}
+
+	// -----------------------------------------------------------------------
+	// Preset bar: tap a preset with the pen or mouse
+	// -----------------------------------------------------------------------
+
+	private barEl: HTMLElement | null = null;
+	private barKey = "";
+
+	/** Show the preset bar in the open drawing, or hide it. */
+	updateBar() {
+		const view = this.app.workspace.getActiveViewOfType(ItemView);
+		const on = this.settings.presetBar && view?.getViewType() === "excalidraw";
+		// Inside the drawing, so the bar takes the drawing's own light or dark colours.
+		const host = on ? (view?.contentEl.querySelector<HTMLElement>(".excalidraw") ?? null) : null;
+		const key = host ? `${this.settings.presets.map((p) => (p ? `${p.name}|${p.style.stroke}|${p.style.fill}` : "")).join(";")}` : "";
+		if (host && this.barEl?.parentElement === host && key === this.barKey) return;
+		this.barEl?.remove();
+		this.barEl = null;
+		this.barKey = key;
+		if (!host) return;
+		const bar = host.createDiv({ cls: "ekh-preset-bar" });
+		// Keep the drawing's focus and selection when the bar is tapped.
+		bar.addEventListener("pointerdown", (e) => e.preventDefault());
+		bar.addEventListener("mousedown", (e) => e.preventDefault());
+		this.settings.presets.forEach((p, i) => {
+			if (!p) return;
+			const b = bar.createEl("button", { cls: "ekh-preset", attr: { "aria-label": `${p.name}\nClick: use. Right-click: save over it.`, "data-tooltip-position": "top" } });
+			const sw = b.createSpan({ cls: "ekh-swatch" });
+			const stroke = p.style.stroke;
+			if (stroke === undefined || stroke === "transparent") sw.addClass("is-none");
+			else sw.setCssProps({ "--ekh-swatch": stroke });
+			if (p.style.fill && p.style.fill !== "transparent") sw.setCssProps({ "--ekh-swatch-fill": p.style.fill });
+			b.createSpan({ cls: "ekh-preset-num", text: String(i + 1) });
+			b.addEventListener("click", () => this.fromBar((c) => this.usePreset(c, i)));
+			b.addEventListener("contextmenu", (e) => {
+				e.preventDefault();
+				this.fromBar((c) => this.savePreset(c, i));
+			});
+		});
+		const add = bar.createEl("button", { cls: "ekh-preset ekh-preset-add", text: "+", attr: { "aria-label": "Save the pen, or the selected shape's style, as a new preset", "data-tooltip-position": "top" } });
+		add.addEventListener("click", () =>
+			this.fromBar((c) => {
+				const i = this.settings.presets.findIndex((p) => !p);
+				if (i < 0) return showInfo("All 9 presets are full. Right-click one to save over it.");
+				return this.savePreset(c, i);
+			}),
+		);
+		this.barEl = bar;
+	}
+
+	private fromBar(fn: (c: Ctx) => unknown) {
+		const c = this.context();
+		if (!c) return;
+		void this.tracked(c, () => fn(c)).then(() => this.updateBar());
 	}
 
 	/** The tool command whose letter this key is, if any. */
@@ -1287,7 +1653,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		e.preventDefault();
 		e.stopImmediatePropagation();
 		if (!a.canRun(c)) showInfo("Select something first");
-		else void a.run(c);
+		else void this.runAction(a, c);
 		return true;
 	}
 
@@ -2048,6 +2414,26 @@ export default class ExcalidrawHotkeys extends Plugin {
 		list.push({ id: "leader", name: "Start a key sequence (leader key)", group: "Leader", canRun: always, run: () => this.startLeader() });
 		list.push({ id: "search", name: "Search styles and commands", group: "Leader", keys: [hk(["Alt"], "Z")], canRun: always, run: () => this.openSearch() });
 
+
+		// Repeat ---------------------------------------------------------------------
+		// Its key lives in Settings, Drawing keys: a plain letter would block typing everywhere.
+		list.push({ id: "repeat", name: "Repeat the last change", group: "Repeat", canRun: always, run: (c) => this.repeat(c) });
+
+		// Line up and spread out ------------------------------------------------------
+		const arrange: [string, string, Parameters<ExcalidrawHotkeys["arrange"]>[1]][] = [
+			["align-left", "Line up left edges", "left"],
+			["align-right", "Line up right edges", "right"],
+			["align-top", "Line up top edges", "top"],
+			["align-bottom", "Line up bottom edges", "bottom"],
+			["align-centre", "Centre left to right", "centre"],
+			["align-middle", "Centre top to bottom", "middle"],
+			["spread-across", "Spread out evenly across", "across"],
+			["spread-down", "Spread out evenly down", "down"],
+		];
+		for (const [id, name, mode] of arrange) {
+			list.push({ id, name, group: "Arrange", canRun: hasSelection, run: (c) => this.arrange(c, mode) });
+		}
+
 		return list;
 	}
 }
@@ -2170,7 +2556,7 @@ class HotkeyListModal extends Modal {
 // ---------------------------------------------------------------------------
 
 type NumberKey = "whichKeyDelay" | "nudgeStep" | "nudgeStepShift" | "resizePercent" | "duplicateGap" | "fitPadding" | "zoomMs";
-type ToggleKey = "whichKey" | "catchKeysFirst" | "showStatusColours" | "showOneByOne" | "shiftGoesBack" | "diagonalNudge" | "copyText" | "copyFill" | "zoomOnSelection";
+type ToggleKey = "presetBar" | "whichKey" | "catchKeysFirst" | "showStatusColours" | "showOneByOne" | "shiftGoesBack" | "diagonalNudge" | "copyText" | "copyFill" | "zoomOnSelection";
 
 function parseZoomPresets(v: string): number[] {
 	return v
@@ -2282,6 +2668,7 @@ class HotkeySettingTab extends PluginSettingTab {
 							...([
 								["Tools", "Tools"],
 								["Move between shapes", "Move"],
+								["Repeat", "Repeat"],
 								["Leader key", "Leader"],
 							] as const).map(
 								([heading, group]): SettingDefinitionItem => ({
@@ -2308,6 +2695,109 @@ class HotkeySettingTab extends PluginSettingTab {
 					},
 					{
 						type: "page",
+						name: "Leader menu",
+						desc: "The letters after the leader key, and your own key sequences for any command.",
+						displayValue: () => `${this.plugin.settings.leaderCustom.length} of your own`,
+						items: [
+							{
+								type: "group",
+								heading: "Menus",
+								items: [
+									{
+										name: "Reset menu letters",
+										desc: "Put back the suggested letters.",
+										action: () => {
+											this.plugin.settings.leaderMenuKeys = {};
+											void this.plugin.saveSettings().then(() => this.update());
+										},
+									},
+									...LEADER_MENUS.map(
+										([id, label, def]): SettingDefinition => ({
+											name: label,
+											desc: `Suggested: ${comboLabel(def)}. Leave empty to turn it off.`,
+											aliases: ["leader", "sequence", "menu", "letter"],
+											render: (setting) => {
+												const now = () => this.plugin.settings.leaderMenuKeys[id] ?? def;
+												setting.addText((t) => {
+													t.inputEl.addClass("ekh-letter");
+													t.setValue(comboLabel(now())).onChange((raw) => {
+														const v = raw.trim().slice(-1);
+														const step = v ? this.plugin.leaderSteps(v)[0] : "";
+														const other = LEADER_MENUS.find(([o, , d]) => o !== id && (this.plugin.settings.leaderMenuKeys[o] ?? d) === step && step);
+														if (other) {
+															new Notice(`${comboLabel(step)} is already used by ${other[1]}`);
+															t.setValue(comboLabel(now()));
+															return;
+														}
+														this.plugin.settings.leaderMenuKeys[id] = step;
+														t.setValue(comboLabel(step));
+														void this.plugin.saveSettings();
+													});
+												});
+											},
+										}),
+									),
+								],
+							},
+							{
+								type: "group",
+								heading: "Your own sequences",
+								items: [
+									{
+										name: "Add a sequence",
+										desc: "Pick any Obsidian command, then type its keys, like G G.",
+										action: () =>
+											new CommandPickerModal(this.app, this.plugin, (id) => {
+												this.plugin.settings.leaderCustom.push({ keys: "", command: id });
+												void this.plugin.saveSettings().then(() => this.update());
+											}).open(),
+									},
+									...this.plugin.settings.leaderCustom.map(
+										(s, i): SettingDefinition => ({
+											name: this.plugin.commandName(s.command),
+											desc: s.keys ? (this.plugin.leaderClash(s.keys) ? `Replaces ${this.plugin.leaderClash(s.keys)}` : "") : "Type its keys.",
+											aliases: ["leader", "sequence", "custom"],
+											render: (setting) => {
+												setting.addText((t) =>
+													t
+														.setPlaceholder("Keys, like G G")
+														.setValue(s.keys)
+														.onChange((v) => {
+															s.keys = v.toUpperCase();
+															const clash = this.plugin.leaderClash(s.keys);
+															setting.setDesc(clash ? `Replaces ${clash}` : "");
+															void this.plugin.saveSettings();
+														}),
+												);
+												setting.addExtraButton((b) =>
+													b
+														.setIcon("search")
+														.setTooltip("Pick another command")
+														.onClick(() =>
+															new CommandPickerModal(this.app, this.plugin, (id) => {
+																s.command = id;
+																void this.plugin.saveSettings().then(() => this.update());
+															}).open(),
+														),
+												);
+												setting.addExtraButton((b) =>
+													b
+														.setIcon("x")
+														.setTooltip("Remove")
+														.onClick(() => {
+															this.plugin.settings.leaderCustom.splice(i, 1);
+															void this.plugin.saveSettings().then(() => this.update());
+														}),
+												);
+											},
+										}),
+									),
+								],
+							},
+						],
+					},
+					{
+						type: "page",
 						name: "Pen presets",
 						desc: "Saved pens: colour, fill, line, font and more in one key.",
 						displayValue: () => `${this.plugin.settings.presets.filter(Boolean).length} saved`,
@@ -2319,6 +2809,7 @@ class HotkeySettingTab extends PluginSettingTab {
 										name: "Save a preset",
 										desc: "In a drawing, run Save pen as preset 1 to 9, or press the leader key, then P, S and a number. It saves the selected shape's style, or your pen.",
 									},
+									toggle("Show preset bar", "A row of your presets at the bottom of a drawing. Click one to use it. Right-click one to save over it. + saves a new one.", "presetBar"),
 								],
 							},
 							{
@@ -2564,6 +3055,7 @@ class HotkeySettingTab extends PluginSettingTab {
 		}
 		await this.plugin.saveSettings();
 		if (key === "showOneByOne" || key === "shiftGoesBack") this.plugin.registerCommands();
+		if (key === "presetBar") this.plugin.updateBar();
 	}
 }
 
@@ -2633,5 +3125,35 @@ class StyleSearchModal extends SuggestModal<SearchItem> {
 
 	onChooseSuggestion(it: SearchItem) {
 		this.pick(it);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pick any command, with the smart search
+// ---------------------------------------------------------------------------
+
+class CommandPickerModal extends SuggestModal<{ id: string; name: string }> {
+	constructor(
+		app: App,
+		private plugin: ExcalidrawHotkeys,
+		private pick: (id: string) => void,
+	) {
+		super(app);
+		this.setPlaceholder("Find a command, like: thicker line");
+		this.limit = 80;
+	}
+
+	getSuggestions(query: string): { id: string; name: string }[] {
+		const all = (this.app as AppInternals).commands?.listCommands?.() ?? [];
+		const list = all.map((c) => ({ id: c.id, name: c.name }));
+		return query.trim() ? rank(query, list, (c) => words(c.name), (c) => c.name) : list;
+	}
+
+	renderSuggestion(it: { id: string; name: string }, el: HTMLElement) {
+		el.createDiv({ text: it.name });
+	}
+
+	onChooseSuggestion(it: { id: string; name: string }) {
+		this.pick(it.id);
 	}
 }

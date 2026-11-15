@@ -133,3 +133,70 @@
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
 }
+
+/* Preset bar: a row of saved pens at the bottom of a drawing */
+.ekh-preset-bar {
+	position: absolute;
+	left: 50%;
+	bottom: 16px;
+	transform: translateX(-50%);
+	z-index: 5;
+	display: flex;
+	gap: 4px;
+	padding: 4px;
+	background: var(--island-bg-color, var(--background-primary));
+	border-radius: var(--border-radius-lg, var(--radius-m));
+	box-shadow: var(--shadow-island, var(--shadow-s));
+}
+
+.ekh-preset-bar .ekh-preset {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 36px;
+	min-width: 36px;
+	padding: 0 8px;
+	box-shadow: none;
+	border: none;
+	background: transparent;
+	color: var(--text-primary-color, var(--text-normal));
+	border-radius: var(--border-radius-md, var(--radius-s));
+	font-variant-numeric: tabular-nums;
+	cursor: pointer;
+}
+
+.ekh-preset-bar .ekh-preset:hover {
+	background: var(--button-hover-bg, var(--background-modifier-hover));
+}
+
+.is-mobile .ekh-preset-bar {
+	bottom: 72px;
+}
+
+.is-mobile .ekh-preset-bar .ekh-preset {
+	min-height: 44px;
+	min-width: 44px;
+}
+
+/* Ring is the pen colour, inside is the fill. */
+.ekh-preset-bar .ekh-swatch {
+	border-radius: 50%;
+	background-color: var(--ekh-swatch-fill, transparent);
+	box-shadow: inset 0 0 0 3px var(--ekh-swatch, transparent);
+}
+
+/* Excalidraw makes its dark buttons by flipping light ones. The bar does the same, so swatches match the drawing. */
+.excalidraw.theme--dark .ekh-preset-bar {
+	filter: var(--theme-filter, invert(93%) hue-rotate(180deg));
+}
+
+.ekh-preset-bar .ekh-preset-add {
+	font-size: var(--font-ui-medium);
+	color: var(--color-gray-60, var(--text-muted));
+}
+
+/* One-letter field for a leader menu key */
+.ekh-letter {
+	width: 3em;
+	text-align: center;
+}

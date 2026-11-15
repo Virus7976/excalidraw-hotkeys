@@ -1,6 +1,6 @@
 {
 	"name": "excalidraw-hotkeys",
-	"version": "0.5.0",
+	"version": "0.6.0",
 	"description": "Configurable hotkeys for Excalidraw in Obsidian",
 	"main": "main.js",
 	"private": true,

@@ -40,6 +40,9 @@ const GROUPS: string[][] = [
 	["arrow", "arrows", "connector", "connectors"],
 	["line", "lines", "straight"],
 	["align", "alignment", "justify"],
+	["lineup", "arrange", "tidy"],
+	["spread", "distribute", "even", "evenly", "space", "spacing", "spaced"],
+	["repeat", "again", "redo", "same"],
 	["reset", "default", "defaults"],
 ];
 const CANON = new Map<string, string>();
@@ -60,6 +63,7 @@ export function words(text: string): string[] {
 	return text
 		.toLowerCase()
 		.replace(/hand-drawn/g, "handdrawn")
+		.replace(/line[\s-]+up/g, "lineup")
 		.replace(/see[\s-]*through/g, "seethrough")
 		.split(/[^a-z0-9]+/)
 		.filter(Boolean)
