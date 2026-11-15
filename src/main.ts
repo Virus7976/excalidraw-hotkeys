@@ -2769,7 +2769,8 @@ export default class ExcalidrawHotkeys extends Plugin {
 			for (const b of badges) ea.getElement(b.id).isDeleted = true;
 			for (const e of fold.els) ea.elementsDict[e.id] = { ...e, x: e.x + dx, y: e.y + dy, isDeleted: false };
 			await commitEA(ea, [node.id]);
-			showInfo(`Showing ${fold.els.filter((e) => SHAPES.includes(e.type)).length} hidden boxes`);
+			const shown = fold.els.filter((e) => SHAPES.includes(e.type)).length;
+			showInfo(`Showing ${shown} hidden ${shown === 1 ? "box" : "boxes"}`);
 			return;
 		}
 		// Fold: everything below this box, with the arrows between, and their labels.
@@ -2802,7 +2803,7 @@ export default class ExcalidrawHotkeys extends Plugin {
 		const badge = ea.addText(node.x + node.width + 8, node.y + node.height / 2 - 10, `+${boxes.size}`);
 		(ea.getElement(badge) as unknown as { customData?: Record<string, unknown> }).customData = { ekhFoldBadge: node.id };
 		await commitEA(ea, [node.id]);
-		showInfo(`Folded ${boxes.size} boxes. Same key to show them.`);
+		showInfo(`Folded ${boxes.size} ${boxes.size === 1 ? "box" : "boxes"}. Same key to show ${boxes.size === 1 ? "it" : "them"}.`);
 	}
 
 	// -----------------------------------------------------------------------

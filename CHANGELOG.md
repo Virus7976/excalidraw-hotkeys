@@ -1,5 +1,11 @@
 # What's new
 
+## 0.8.1 (15 Nov 2026)
+
+- Folding one box now says "Folded 1 box", not "1 boxes".
+
+![Folded 1 box](https://raw.githubusercontent.com/Virus7976/excalidraw-hotkeys/0.8.1/docs/media/0.8.1-fold.png)
+
 ## 0.8.0 (15 Nov 2026)
 
 **Tidy and fold a mind map.** Leader, N, T spaces out the whole map so no branch overlaps another. Leader, N, F hides the boxes under a box and shows a +3. The same key shows them again.
