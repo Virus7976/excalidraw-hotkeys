@@ -504,8 +504,10 @@ function describeStyle(s: Style, st: HotkeySettings): string {
 	if (s.strokeWidth !== undefined) parts.push(LINE_WIDTHS.find((w) => w[2] === s.strokeWidth)?.[1].toLowerCase() ?? `width ${s.strokeWidth}`);
 	if (s.strokeStyle !== undefined && s.strokeStyle !== "solid") parts.push(s.strokeStyle);
 	if (s.opacity !== undefined && s.opacity !== 100) parts.push(`${s.opacity}% opacity`);
-	if (s.fontFamily !== undefined) parts.push(`${FONTS.find((f) => f[2] === s.fontFamily)?.[1].toLowerCase() ?? "other"} font`);
-	if (s.fontSize !== undefined) parts.push(`${FONT_SIZES.find((f) => f[1] === s.fontSize)?.[0] ?? s.fontSize} text`);
+	// Older drawings use older font numbers: 1 is hand-drawn, 2 normal and 3 code.
+	const font = s.fontFamily === undefined ? undefined : ({ 1: "hand-drawn", 2: "normal", 3: "code" } as Record<number, string>)[s.fontFamily] ?? FONTS.find((f) => f[2] === s.fontFamily)?.[1].toLowerCase();
+	if (font) parts.push(`${font} font`);
+	if (s.fontSize !== undefined) parts.push(FONT_SIZES.some((f) => f[1] === s.fontSize) ? `${FONT_SIZES.find((f) => f[1] === s.fontSize)?.[0]} text` : `text size ${s.fontSize}`);
 	if (s.textAlign !== undefined && s.textAlign !== "left") parts.push(`align ${s.textAlign === "center" ? "centre" : s.textAlign}`);
 	if (s.startArrowhead !== undefined || s.endArrowhead !== undefined) {
 		const a = !!s.startArrowhead;

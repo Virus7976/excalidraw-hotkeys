@@ -118,7 +118,7 @@ Change the menu letters in Settings → Leader menu. There you can also add your
 
 ### Search
 
-`Alt+Z` opens a search for styles and commands. It knows other words (circle, thicker, copy, see-through) and small typos. Type several styles at once, like `blu dashd thik`. The top result then sets all of them in one step.
+`Alt+Z` opens a search for styles and commands. It knows other words (circle, thicker, copy, see-through), small typos and short forms like `grn`. Type several styles at once, like `blu dashd thik`. The top result then sets all of them in one step.
 
 ### Diagonal move
 

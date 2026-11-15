@@ -103,8 +103,17 @@ function plainScore(q: string, w: string): number {
 	// A missed letter is the most common typo, so it beats a wrong letter: "thik" is "thick", not "thin".
 	if (q.length >= 3 && w.length === q.length + 1 && missedOne(q, w)) return 1.75;
 	if (q.length >= 4 && distance(q, w) <= 1) return 1.5;
+	// Short forms leave letters out but keep the order: "grn" is green, "dotd" is dotted.
+	if (q.length >= 3 && q[0] === w[0] && w.length - q.length <= 3 && inOrder(q, w)) return 1.5;
 	if (q.length >= 7 && distance(q, w) <= 2) return 1;
 	return 0;
+}
+
+/** True when every letter of q is in w, in the same order. */
+function inOrder(q: string, w: string): boolean {
+	let i = 0;
+	for (const ch of w) if (ch === q[i]) i++;
+	return i === q.length;
 }
 
 export interface Match {
